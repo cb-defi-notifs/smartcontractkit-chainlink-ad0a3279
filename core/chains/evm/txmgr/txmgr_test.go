@@ -432,6 +432,7 @@ type mockConfig struct {
 	evmConfig           *evmConfig
 	rpcDefaultBatchSize uint32
 	finalityDepth       uint32
+	finalityTag         bool
 }
 
 func (c *mockConfig) EVM() evmconfig.EVM {
@@ -441,6 +442,7 @@ func (c *mockConfig) EVM() evmconfig.EVM {
 func (c *mockConfig) NonceAutoSync() bool                                  { return true }
 func (c *mockConfig) ChainType() config.ChainType                          { return "" }
 func (c *mockConfig) FinalityDepth() uint32                                { return c.finalityDepth }
+func (c *mockConfig) FinalityTag() bool                                    { return c.finalityTag }
 func (c *mockConfig) KeySpecificMaxGasPriceWei(common.Address) *assets.Wei { return assets.NewWeiI(0) }
 func (c *mockConfig) RPCDefaultBatchSize() uint32                          { return c.rpcDefaultBatchSize }
 

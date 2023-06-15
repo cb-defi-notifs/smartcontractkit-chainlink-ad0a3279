@@ -26,6 +26,7 @@ type EVM interface {
 	ChainID() *big.Int
 	ChainType() config.ChainType
 	FinalityDepth() uint32
+	FinalityTag() bool
 	FlagsContractAddress() string
 	KeySpecificMaxGasPriceWei(addr gethcommon.Address) *assets.Wei
 	LinkContractAddress() string
