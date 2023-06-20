@@ -155,6 +155,12 @@ func (s *Secrets) SetFrom(f *Secrets) (err error) {
 	return err
 }
 
+func (s *Secrets) setDefaults() {
+	if nil == s.Database.AllowSimplePasswords {
+		s.Database.AllowSimplePasswords = new(bool)
+	}
+}
+
 // TOMLString returns a TOML encoded string with secret values redacted.
 func (s *Secrets) TOMLString() (string, error) {
 	b, err := toml.Marshal(s)
@@ -211,7 +217,7 @@ func (s *Secrets) setEnv() error {
 		}
 	}
 	if config.EnvDatabaseAllowSimplePasswords.IsTrue() {
-		s.Database.AllowSimplePasswords = new(bool)
+		s.setDefaults()
 		*s.Database.AllowSimplePasswords = true
 	}
 	if explorerKey := config.EnvExplorerAccessKey.Get(); explorerKey != "" {
