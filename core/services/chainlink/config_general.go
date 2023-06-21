@@ -64,6 +64,35 @@ type GeneralConfigOpts struct {
 	SkipEnv bool
 }
 
+func (opts *GeneralConfigOpts) Setup(configFiles []string, secretsFiles []string) error {
+	configs := []string{}
+	for _, fileName := range configFiles {
+		b, err := os.ReadFile(fileName)
+		if err != nil {
+			return errors.Wrapf(err, "failed to read config file: %s", fileName)
+		}
+		configs = append(configs, string(b))
+	}
+
+	if configTOML := v2.EnvConfig.Get(); configTOML != "" {
+		configs = append(configs, configTOML)
+	}
+
+	opts.ConfigStrings = configs
+
+	secrets := []string{}
+	for _, fileName := range secretsFiles {
+		b, err := os.ReadFile(fileName)
+		if err != nil {
+			return errors.Wrapf(err, "failed to read secrets file: %s", fileName)
+		}
+		secrets = append(secrets, string(b))
+	}
+
+	opts.SecretsStrings = secrets
+	return nil
+}
+
 // parseConfig sets Config from the given TOML string, overriding any existing duplicate Config fields.
 func (o *GeneralConfigOpts) parseConfig(config string) error {
 	var c Config
@@ -95,21 +124,10 @@ func (o *GeneralConfigOpts) parseSecrets(secrets string) error {
 
 // New returns a coreconfig.GeneralConfig for the given options.
 func (o GeneralConfigOpts) New() (GeneralConfig, error) {
-	for _, c := range o.ConfigStrings {
-		err := o.parseConfig(c)
-		if err != nil {
-			return nil, err
-		}
+	err := o.parse()
+	if err != nil {
+		return nil, err
 	}
-
-	for _, s := range o.SecretsStrings {
-		err := o.parseSecrets(s)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	o.Secrets.setDefaults()
 
 	input, err := o.Config.TOMLString()
 	if err != nil {
@@ -150,6 +168,25 @@ func (o GeneralConfigOpts) New() (GeneralConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func (o *GeneralConfigOpts) parse() (err error) {
+	for _, c := range o.ConfigStrings {
+		err := o.parseConfig(c)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, s := range o.SecretsStrings {
+		err := o.parseSecrets(s)
+		if err != nil {
+			return err
+		}
+	}
+
+	o.Secrets.setDefaults()
+	return
 }
 
 func (g *generalConfig) EVMConfigs() evmcfg.EVMConfigs {
