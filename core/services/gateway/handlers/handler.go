@@ -38,6 +38,8 @@ type Handler interface {
 }
 
 // Representation of a DON from a Handler's perspective.
+//
+//go:generate mockery --quiet --name DON --output ./mocks/ --case=underscore
 type DON interface {
 	// Thread-safe
 	SendToNode(ctx context.Context, nodeAddress string, msg *api.Message) error

@@ -11,7 +11,13 @@ import (
 func TestRateLimiter_Simple(t *testing.T) {
 	t.Parallel()
 
-	rl := handlers.NewRateLimiter(3.0, 3, 1.0, 2)
+	config := handlers.RateLimiterConfig{
+		GlobalRPS:    3.0,
+		GlobalBurst:  3,
+		PerUserRPS:   1.0,
+		PerUserBurst: 2,
+	}
+	rl := handlers.NewRateLimiter(config)
 	require.True(t, rl.Allow("user1"))
 	require.True(t, rl.Allow("user2"))
 	require.True(t, rl.Allow("user1"))
