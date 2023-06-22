@@ -1,0 +1,42 @@
+
+
+%%{init: {'theme':'dark'}}%%
+flowchart
+    subgraph diagram["Keystore & Relayer communications"]
+        direction TB
+        subgraph chainlink2["Chainlink Process (host)"]
+            subgraph ksServer[Keystore Server]
+            end
+            subgraph OCR2[OCR2 Service]
+            end
+                subgraph productClient[OCR2 ReportingPlugin Client]
+                end
+                subgraph rlClient[Relayer client]
+            
+            end
+            
+            
+        end
+        subgraph loopp["Relayer Process"]
+            subgraph rlServer[Relayer Service]
+                ksClient[Keystore client]
+            end
+        end
+
+        subgraph looppProduct["Product Process"]
+            subgraph ocr2Server[OCR2 ReportingPlugin Service]
+             
+            end
+        end
+    end
+
+    ksServer <--> ksClient
+    rlServer <--> rlClient
+    productClient <--> ocr2Server
+
+    rlClient <-.-> productClient
+    OCR2 <-.-> rlClient
+    OCR2 <-.-> productClient
+    
+    classDef group fill:none,stroke-dasharray:10
+

@@ -1,0 +1,64 @@
+%%{init: {'theme':'dark'}}%%
+flowchart
+    subgraph docker["Docker Container"]
+        style docker fill:none
+        subgraph chainlink["Chainlink Process"]
+            subgraph core[Common]
+                OCR2
+            end
+            subgraph evm[EVM]
+                evmrelayer[Relayer]
+            end
+            subgraph solana[Solana]
+                solrelayer[Relayer]
+            end
+            subgraph starknet[Starknet]
+                starkrelayer[Relayer]
+            end
+            subgraph cosmos[Cosmos]
+                cosmosrelayer[Relayer]
+            end
+        end
+    end
+    core --> evm
+    core --> solana
+    core --> starknet
+    core --> cosmos
+    subgraph docker2["Docker Container"]
+        style docker2 fill:none
+        direction TB
+        subgraph chainlink2["Chainlink Process"]
+            subgraph core2[Common]
+                Oracle2[OCR2]
+            end
+        end
+        subgraph evmplug["EVM Process"]
+            subgraph evm2[EVM]
+                evmrelayer2[relayer]
+            end
+        end
+        subgraph solanaplug["Solana Process"]
+            subgraph solana2[Solana]
+                solrelayer2[relayer]
+            end
+        end
+        subgraph starknetplug["Starknet Process"]
+            subgraph starknet2[Starknet]
+                starkrelayer2[relayer]
+            end
+        end
+        subgraph cosmosplug["Cosmos Process"]
+            subgraph cosmos2[Cosmos]
+                cosmosrelayer2[relayer]
+            end
+        end
+    end
+    chainlink2 --> evmplug
+    chainlink2 --> solanaplug
+    chainlink2 --> starknetplug
+    chainlink2 --> cosmosplug
+    docker --> docker2
+
+    classDef group fill:none,stroke-dasharray:10
+    class docker,core,evm,solana,starknet,cosmos group
+    class docker2,core2,evm2,solana2,starknet2,cosmos2 group

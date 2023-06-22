@@ -1,0 +1,37 @@
+%%{init: {'theme':'dark'}}%%
+flowchart
+  ocr2[OCR2]
+  reportingPlugin[ReportingPlugin]
+  medianPlugin[Median Plugin]
+  mercuryPlugin[Mercury Plugin]
+  ocr2 --> reportingPlugin --> medianPlugin
+  reportingPlugin --> mercuryPlugin
+  subgraph relayer[Relayer Interface]
+    configProvider[ConfigProvider]
+    subgraph pluginProvider[PluginProvider]
+        pluginBase[ConfigProvider]
+    end
+    subgraph medianProvider[MedianProvider]
+        medianBase[PluginProvider]
+    end
+    subgraph mercuryProvider[MercuryProvider]
+        mercuryBase[PluginProvider]
+    end
+  end
+  ocr2 --> configProvider --> impl
+  ocr2 --> pluginProvider --> impl
+  medianPlugin --> medianProvider -.-> impl
+  mercuryPlugin --> mercuryProvider -.-> impl
+  impl -.-> solImpl
+  impl -.->  starkImpl
+  impl -.-> evmImpl
+
+  impl[Relayer Implementation]
+  solImpl[Solana Implementation]
+  starkImpl[Starknet Implementation]
+  evmImpl[EVM Implementation]
+
+  classDef outline fill:none,stroke-width:2px,stroke-dasharray: 10
+  class reportingPlugin,relayer,configProvider,pluginProvider,pluginBase,medianProvider,mercuryProvider,medianBase,mercuryBase outline
+  classDef loopDone  fill:#39f,stroke:#333,stroke-width:2px
+  class solImpl,starkImpl,medianPlugin loopDone
