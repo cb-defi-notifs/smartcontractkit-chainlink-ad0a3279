@@ -64,7 +64,7 @@ type GeneralConfigOpts struct {
 	SkipEnv bool
 }
 
-func (opts *GeneralConfigOpts) Setup(configFiles []string, secretsFiles []string) error {
+func (o *GeneralConfigOpts) Setup(configFiles []string, secretsFiles []string) error {
 	configs := []string{}
 	for _, fileName := range configFiles {
 		b, err := os.ReadFile(fileName)
@@ -78,7 +78,7 @@ func (opts *GeneralConfigOpts) Setup(configFiles []string, secretsFiles []string
 		configs = append(configs, configTOML)
 	}
 
-	opts.ConfigStrings = configs
+	o.ConfigStrings = configs
 
 	secrets := []string{}
 	for _, fileName := range secretsFiles {
@@ -89,7 +89,7 @@ func (opts *GeneralConfigOpts) Setup(configFiles []string, secretsFiles []string
 		secrets = append(secrets, string(b))
 	}
 
-	opts.SecretsStrings = secrets
+	o.SecretsStrings = secrets
 	return nil
 }
 
