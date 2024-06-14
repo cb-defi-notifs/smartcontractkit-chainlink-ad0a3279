@@ -2,22 +2,20 @@ package txmgr
 
 import (
 	"context"
-	"time"
+	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/pkg/errors"
 
 	txmgrtypes "github.com/smartcontractkit/chainlink/v2/common/txmgr/types"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 )
 
 var _ txmgrtypes.TxStrategy = SendEveryStrategy{}
 
 // NewQueueingTxStrategy creates a new TxStrategy that drops the oldest transactions after the
 // queue size is exceeded if a queue size is specified, and otherwise does not drop transactions.
-func NewQueueingTxStrategy(subject uuid.UUID, queueSize uint32, queryTimeout time.Duration) (strategy txmgrtypes.TxStrategy) {
+func NewQueueingTxStrategy(subject uuid.UUID, queueSize uint32) (strategy txmgrtypes.TxStrategy) {
 	if queueSize > 0 {
-		strategy = NewDropOldestStrategy(subject, queueSize, queryTimeout)
+		strategy = NewDropOldestStrategy(subject, queueSize)
 	} else {
 		strategy = SendEveryStrategy{}
 	}
@@ -33,8 +31,8 @@ func NewSendEveryStrategy() txmgrtypes.TxStrategy {
 type SendEveryStrategy struct{}
 
 func (SendEveryStrategy) Subject() uuid.NullUUID { return uuid.NullUUID{} }
-func (SendEveryStrategy) PruneQueue(pruneService txmgrtypes.UnstartedTxQueuePruner, qopt pg.QOpt) (int64, error) {
-	return 0, nil
+func (SendEveryStrategy) PruneQueue(ctx context.Context, pruneService txmgrtypes.UnstartedTxQueuePruner) ([]int64, error) {
+	return nil, nil
 }
 
 var _ txmgrtypes.TxStrategy = DropOldestStrategy{}
@@ -42,28 +40,25 @@ var _ txmgrtypes.TxStrategy = DropOldestStrategy{}
 // DropOldestStrategy will send the newest N transactions, older ones will be
 // removed from the queue
 type DropOldestStrategy struct {
-	subject      uuid.UUID
-	queueSize    uint32
-	queryTimeout time.Duration
+	subject   uuid.UUID
+	queueSize uint32
 }
 
 // NewDropOldestStrategy creates a new TxStrategy that drops the oldest transactions after the
 // queue size is exceeded.
-func NewDropOldestStrategy(subject uuid.UUID, queueSize uint32, queryTimeout time.Duration) DropOldestStrategy {
-	return DropOldestStrategy{subject, queueSize, queryTimeout}
+func NewDropOldestStrategy(subject uuid.UUID, queueSize uint32) DropOldestStrategy {
+	return DropOldestStrategy{subject, queueSize}
 }
 
 func (s DropOldestStrategy) Subject() uuid.NullUUID {
 	return uuid.NullUUID{UUID: s.subject, Valid: true}
 }
 
-func (s DropOldestStrategy) PruneQueue(pruneService txmgrtypes.UnstartedTxQueuePruner, qopt pg.QOpt) (n int64, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
-
-	defer cancel()
-	n, err = pruneService.PruneUnstartedTxQueue(s.queueSize, s.subject, pg.WithParentCtx(ctx), qopt)
+func (s DropOldestStrategy) PruneQueue(ctx context.Context, pruneService txmgrtypes.UnstartedTxQueuePruner) (ids []int64, err error) {
+	// NOTE: We prune one less than the queue size to prevent the queue from exceeding the max queue size. Which could occur if a new transaction is added to the queue right after we prune.
+	ids, err = pruneService.PruneUnstartedTxQueue(ctx, s.queueSize-1, s.subject)
 	if err != nil {
-		return 0, errors.Wrap(err, "DropOldestStrategy#PruneQueue failed")
+		return ids, fmt.Errorf("DropOldestStrategy#PruneQueue failed: %w", err)
 	}
 	return
 }

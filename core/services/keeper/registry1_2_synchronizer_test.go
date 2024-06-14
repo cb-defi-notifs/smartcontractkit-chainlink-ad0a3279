@@ -12,13 +12,13 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
 	logmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/log/mocks"
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	registry1_2 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_wrapper1_2"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	configtest "github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
@@ -94,8 +94,7 @@ func mockRegistry1_2(
 
 func Test_LogListenerOpts1_2(t *testing.T) {
 	db := pgtest.NewSqlxDB(t)
-	scopedConfig := evmtest.NewChainScopedConfig(t, configtest.NewGeneralConfig(t, nil))
-	korm := keeper.NewORM(db, logger.TestLogger(t), scopedConfig.Database())
+	korm := keeper.NewORM(db, logger.TestLogger(t))
 	ethClient := evmtest.NewEthClientMockWithDefaultChain(t)
 	j := cltest.MustInsertKeeperJob(t, db, korm, cltest.NewEIP55Address(), cltest.NewEIP55Address())
 
@@ -147,6 +146,7 @@ func Test_RegistrySynchronizer1_2_Start(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer1_2_FullSync(t *testing.T) {
+	ctx := testutils.Context(t)
 	g := gomega.NewWithT(t)
 	db, synchronizer, ethMock, _, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
@@ -166,7 +166,7 @@ func Test_RegistrySynchronizer1_2_FullSync(t *testing.T) {
 		3, // sync all 3
 		2,
 		1)
-	synchronizer.ExportedFullSync()
+	synchronizer.ExportedFullSync(ctx)
 
 	cltest.AssertCount(t, db, "keeper_registries", 1)
 	cltest.AssertCount(t, db, "upkeep_registrations", 3)
@@ -212,7 +212,7 @@ func Test_RegistrySynchronizer1_2_FullSync(t *testing.T) {
 		3, // sync all 3 active upkeeps
 		2,
 		1)
-	synchronizer.ExportedFullSync()
+	synchronizer.ExportedFullSync(ctx)
 
 	cltest.AssertCount(t, db, "keeper_registries", 1)
 	cltest.AssertCount(t, db, "upkeep_registrations", 3)
@@ -220,6 +220,7 @@ func Test_RegistrySynchronizer1_2_FullSync(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer1_2_ConfigSetLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
@@ -237,8 +238,7 @@ func Test_RegistrySynchronizer1_2_ConfigSetLog(t *testing.T) {
 		2,
 		0)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { assert.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	var registry keeper.Registry
 	require.NoError(t, db.Get(&registry, `SELECT * FROM keeper_registries`))
@@ -252,19 +252,18 @@ func Test_RegistrySynchronizer1_2_ConfigSetLog(t *testing.T) {
 		Keepers: []common.Address{fromAddress},
 	}).Once()
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash}
 	log := registry1_2.KeeperRegistryConfigSet{}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	cltest.AssertRecordEventually(t, db, &registry, fmt.Sprintf(`SELECT * FROM keeper_registries WHERE id = %d`, registry.ID), func() bool {
 		return registry.BlockCountPerTurn == 40
@@ -273,6 +272,7 @@ func Test_RegistrySynchronizer1_2_ConfigSetLog(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer1_2_KeepersUpdatedLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
@@ -290,8 +290,7 @@ func Test_RegistrySynchronizer1_2_KeepersUpdatedLog(t *testing.T) {
 		2,
 		0)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { assert.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	var registry keeper.Registry
 	require.NoError(t, db.Get(&registry, `SELECT * FROM keeper_registries`))
@@ -304,19 +303,18 @@ func Test_RegistrySynchronizer1_2_KeepersUpdatedLog(t *testing.T) {
 		Keepers: addresses,
 	}).Once()
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash}
 	log := registry1_2.KeeperRegistryKeepersUpdated{}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	cltest.AssertRecordEventually(t, db, &registry, fmt.Sprintf(`SELECT * FROM keeper_registries WHERE id = %d`, registry.ID), func() bool {
 		return registry.NumKeepers == 2
@@ -325,6 +323,7 @@ func Test_RegistrySynchronizer1_2_KeepersUpdatedLog(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer1_2_UpkeepCanceledLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
@@ -342,29 +341,28 @@ func Test_RegistrySynchronizer1_2_UpkeepCanceledLog(t *testing.T) {
 		2,
 		1)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { require.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	cltest.WaitForCount(t, db, "upkeep_registrations", 3)
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash}
 	log := registry1_2.KeeperRegistryUpkeepCanceled{Id: big.NewInt(3)}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	cltest.WaitForCount(t, db, "upkeep_registrations", 2)
 }
 
 func Test_RegistrySynchronizer1_2_UpkeepRegisteredLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
@@ -382,32 +380,31 @@ func Test_RegistrySynchronizer1_2_UpkeepRegisteredLog(t *testing.T) {
 		2,
 		1)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { assert.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	cltest.WaitForCount(t, db, "upkeep_registrations", 1)
 
 	registryMock := cltest.NewContractMockReceiver(t, ethMock, keeper.Registry1_2ABI, contractAddress)
 	registryMock.MockResponse("getUpkeep", upkeepConfig1_2).Once()
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash}
 	log := registry1_2.KeeperRegistryUpkeepRegistered{Id: big.NewInt(420)}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	cltest.WaitForCount(t, db, "upkeep_registrations", 2)
 }
 
 func Test_RegistrySynchronizer1_2_UpkeepPerformedLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	g := gomega.NewWithT(t)
 
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
@@ -427,26 +424,24 @@ func Test_RegistrySynchronizer1_2_UpkeepPerformedLog(t *testing.T) {
 		2,
 		1)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { assert.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	cltest.WaitForCount(t, db, "upkeep_registrations", 1)
 
 	pgtest.MustExec(t, db, `UPDATE upkeep_registrations SET last_run_block_height = 100`)
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash, BlockNumber: 200}
 	log := registry1_2.KeeperRegistryUpkeepPerformed{Id: big.NewInt(3), From: fromAddress}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	g.Eventually(func() int64 {
 		var upkeep keeper.UpkeepRegistration
@@ -464,6 +459,7 @@ func Test_RegistrySynchronizer1_2_UpkeepPerformedLog(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer1_2_UpkeepGasLimitSetLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	g := gomega.NewWithT(t)
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
@@ -482,8 +478,7 @@ func Test_RegistrySynchronizer1_2_UpkeepGasLimitSetLog(t *testing.T) {
 		2,
 		1)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { assert.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	cltest.WaitForCount(t, db, "upkeep_registrations", 1)
 
@@ -500,24 +495,24 @@ func Test_RegistrySynchronizer1_2_UpkeepGasLimitSetLog(t *testing.T) {
 	newConfig.ExecuteGas = 4_000_000 // change from default
 	registryMock.MockResponse("getUpkeep", newConfig).Once()
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash}
 	log := registry1_2.KeeperRegistryUpkeepGasLimitSet{Id: big.NewInt(3), GasLimit: big.NewInt(4_000_000)}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	g.Eventually(getExecuteGas, testutils.WaitTimeout(t), cltest.DBPollingInterval).Should(gomega.Equal(uint32(4_000_000)))
 }
 
 func Test_RegistrySynchronizer1_2_UpkeepReceivedLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
@@ -535,32 +530,31 @@ func Test_RegistrySynchronizer1_2_UpkeepReceivedLog(t *testing.T) {
 		2,
 		1)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { assert.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	cltest.WaitForCount(t, db, "upkeep_registrations", 1)
 
 	registryMock := cltest.NewContractMockReceiver(t, ethMock, keeper.Registry1_2ABI, contractAddress)
 	registryMock.MockResponse("getUpkeep", upkeepConfig1_2).Once()
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash}
 	log := registry1_2.KeeperRegistryUpkeepReceived{Id: big.NewInt(420)}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	cltest.WaitForCount(t, db, "upkeep_registrations", 2)
 }
 
 func Test_RegistrySynchronizer1_2_UpkeepMigratedLog(t *testing.T) {
+	ctx := testutils.Context(t)
 	db, synchronizer, ethMock, lb, job := setupRegistrySync(t, keeper.RegistryVersion_1_2)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
@@ -578,24 +572,22 @@ func Test_RegistrySynchronizer1_2_UpkeepMigratedLog(t *testing.T) {
 		2,
 		1)
 
-	require.NoError(t, synchronizer.Start(testutils.Context(t)))
-	defer func() { require.NoError(t, synchronizer.Close()) }()
+	servicetest.Run(t, synchronizer)
 	cltest.WaitForCount(t, db, "keeper_registries", 1)
 	cltest.WaitForCount(t, db, "upkeep_registrations", 3)
 
-	cfg := configtest.NewGeneralConfig(t, nil)
-	head := cltest.MustInsertHead(t, db, cfg.Database(), 1)
+	head := cltest.MustInsertHead(t, db, 1)
 	rawLog := types.Log{BlockHash: head.Hash}
 	log := registry1_2.KeeperRegistryUpkeepMigrated{Id: big.NewInt(3)}
 	logBroadcast := logmocks.NewBroadcast(t)
 	logBroadcast.On("DecodedLog").Return(&log)
 	logBroadcast.On("RawLog").Return(rawLog)
 	logBroadcast.On("String").Maybe().Return("")
-	lb.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+	lb.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	lb.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Do the thing
-	synchronizer.HandleLog(logBroadcast)
+	synchronizer.HandleLog(ctx, logBroadcast)
 
 	cltest.WaitForCount(t, db, "upkeep_registrations", 2)
 }

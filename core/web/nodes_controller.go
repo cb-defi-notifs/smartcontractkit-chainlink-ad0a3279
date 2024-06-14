@@ -1,15 +1,16 @@
 package web
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/manyminds/api2go/jsonapi"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains"
 	"github.com/smartcontractkit/chainlink/v2/core/logger/audit"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 )
 
 type NodesController interface {
@@ -17,15 +18,32 @@ type NodesController interface {
 	Index(c *gin.Context, size, page, offset int)
 }
 
+type NetworkScopedNodeStatuser struct {
+	network  string
+	relayers chainlink.RelayerChainInteroperators
+}
+
+func NewNetworkScopedNodeStatuser(relayers chainlink.RelayerChainInteroperators, network string) *NetworkScopedNodeStatuser {
+	scoped := relayers.List(chainlink.FilterRelayersByType(network))
+	return &NetworkScopedNodeStatuser{
+		network:  network,
+		relayers: scoped,
+	}
+}
+
+func (n *NetworkScopedNodeStatuser) NodeStatuses(ctx context.Context, offset, limit int, relayIDs ...types.RelayID) (nodes []types.NodeStatus, count int, err error) {
+	return n.relayers.NodeStatuses(ctx, offset, limit, relayIDs...)
+}
+
 type nodesController[R jsonapi.EntityNamer] struct {
-	nodeSet       chains.Nodes
+	nodeSet       *NetworkScopedNodeStatuser
 	errNotEnabled error
 	newResource   func(status types.NodeStatus) R
 	auditLogger   audit.AuditLogger
 }
 
 func newNodesController[R jsonapi.EntityNamer](
-	nodeSet chains.Nodes,
+	nodeSet *NetworkScopedNodeStatuser,
 	errNotEnabled error,
 	newResource func(status types.NodeStatus) R,
 	auditLogger audit.AuditLogger,
@@ -55,7 +73,14 @@ func (n *nodesController[R]) Index(c *gin.Context, size, page, offset int) {
 		nodes, count, err = n.nodeSet.NodeStatuses(c, offset, size)
 	} else {
 		// fetch nodes for chain ID
-		nodes, count, err = n.nodeSet.NodeStatuses(c, offset, size, id)
+		// backward compatibility
+		var rid types.RelayID
+		err = rid.UnmarshalString(id)
+		if err != nil {
+			rid.ChainID = id
+			rid.Network = n.nodeSet.network
+		}
+		nodes, count, err = n.nodeSet.NodeStatuses(c, offset, size, rid)
 	}
 
 	var resources []R

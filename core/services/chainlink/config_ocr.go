@@ -5,15 +5,15 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
-	v2 "github.com/smartcontractkit/chainlink/v2/core/config/v2"
-	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
+	"github.com/smartcontractkit/chainlink/v2/core/config/toml"
 )
 
 var _ config.OCR = (*ocrConfig)(nil)
 
 type ocrConfig struct {
-	c v2.OCR
+	c toml.OCR
 }
 
 func (o *ocrConfig) Enabled() bool {
@@ -48,7 +48,7 @@ func (o *ocrConfig) SimulateTransactions() bool {
 	return *o.c.SimulateTransactions
 }
 
-func (o *ocrConfig) TransmitterAddress() (ethkey.EIP55Address, error) {
+func (o *ocrConfig) TransmitterAddress() (types.EIP55Address, error) {
 	a := *o.c.TransmitterAddress
 	if a.IsZero() {
 		return a, errors.Wrap(config.ErrEnvUnset, "OCR.TransmitterAddress is not set")

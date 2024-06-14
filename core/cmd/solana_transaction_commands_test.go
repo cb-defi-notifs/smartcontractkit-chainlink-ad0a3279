@@ -15,28 +15,29 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/utils"
+	"github.com/smartcontractkit/chainlink-common/pkg/config"
 	solanaClient "github.com/smartcontractkit/chainlink-solana/pkg/solana/client"
 	solcfg "github.com/smartcontractkit/chainlink-solana/pkg/solana/config"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/solana"
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 )
 
 func TestShell_SolanaSendSol(t *testing.T) {
+	ctx := testutils.Context(t)
 	chainID := "localnet"
 	url := solanaClient.SetupLocalSolNode(t)
 	node := solcfg.Node{
 		Name: ptr(t.Name()),
-		URL:  utils.MustParseURL(url),
+		URL:  config.MustParseURL(url),
 	}
-	cfg := solana.SolanaConfig{
+	cfg := solcfg.TOMLConfig{
 		ChainID: &chainID,
-		Nodes:   solana.SolanaNodes{&node},
+		Nodes:   solcfg.Nodes{&node},
+		Enabled: ptr(true),
 	}
 	app := solanaStartNewApplication(t, &cfg)
-	from, err := app.GetKeyStore().Solana().Create()
+	from, err := app.GetKeyStore().Solana().Create(ctx)
 	require.NoError(t, err)
 	to, err := solanago.NewRandomPrivateKey()
 	require.NoError(t, err)
@@ -68,7 +69,7 @@ func TestShell_SolanaSendSol(t *testing.T) {
 			require.NoError(t, err)
 
 			set := flag.NewFlagSet("sendsolcoins", 0)
-			cltest.FlagSetApplyFromAction(client.SolanaSendSol, set, "solana")
+			flagSetApplyFromAction(client.SolanaSendSol, set, "solana")
 
 			require.NoError(t, set.Set("id", chainID))
 			require.NoError(t, set.Parse([]string{tt.amount, from.PublicKey().String(), to.PublicKey().String()}))

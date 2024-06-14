@@ -3,26 +3,12 @@
   "basePath": "./contracts/test/",
   "splits": [
     {
-      "dir": "cross-version",
-      "numOfSplits": 1
-    },
-    {
-      "dir": "v0.6",
-      "numOfSplits": 1
-    },
-    {
-      "dir": "v0.7",
-      "numOfSplits": 1
-    },
-    {
       "dir": "v0.8",
-      "numOfSplits": 8,
+      "numOfSplits": 5,
       "slowTests": [
-        "Keeper",
-        "Cron.test",
-        "CronUpkeep.test",
-        "EthBalanceMonitor",
-        "CanaryUpkeep"
+        "CronUpkeepFactory",
+        "AutomationRegistry2_2",
+        "AutomationRegistry2_3"
       ]
     }
   ]

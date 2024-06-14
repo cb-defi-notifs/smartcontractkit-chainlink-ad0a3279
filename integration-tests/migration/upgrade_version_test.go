@@ -1,78 +1,49 @@
 package migration
 
 import (
-	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zapcore"
 
-	"github.com/smartcontractkit/chainlink-env/environment"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
-	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils"
-
+	"github.com/smartcontractkit/chainlink-testing-framework/logging"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
-	"github.com/smartcontractkit/chainlink/integration-tests/config"
-	"github.com/smartcontractkit/chainlink/integration-tests/networks"
+	"github.com/smartcontractkit/chainlink/integration-tests/docker/test_env"
+
+	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
 )
 
 func TestVersionUpgrade(t *testing.T) {
 	t.Parallel()
-	testEnvironment, testNetwork := setupUpgradeTest(t)
-	if testEnvironment.WillUseRemoteRunner() {
-		return
-	}
 
-	upgradeImage, err := utils.GetEnv("UPGRADE_IMAGE")
-	require.NoError(t, err, "Error getting upgrade image")
-	upgradeVersion, err := utils.GetEnv("UPGRADE_VERSION")
-	require.NoError(t, err, "Error getting upgrade version")
+	l := logging.GetTestLogger(t)
 
-	chainClient, err := blockchain.NewEVMClient(testNetwork, testEnvironment)
-	require.NoError(t, err, "Connecting to blockchain nodes shouldn't fail")
-	chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
-	require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
+	config, err := tc.GetConfig("Migration", tc.Node)
+	require.NoError(t, err, "Error getting config")
 
-	t.Cleanup(func() {
-		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.ErrorLevel, chainClient)
-		require.NoError(t, err, "Error tearing down environment")
-	})
+	err = config.ChainlinkUpgradeImage.Validate()
+	require.NoError(t, err, "Error validating upgrade image")
 
-	err = actions.UpgradeChainlinkNodeVersions(testEnvironment, upgradeImage, upgradeVersion, chainlinkNodes[0])
-	require.NoError(t, err, "Upgrading chainlink nodes shouldn't fail")
-}
+	privateNetwork, err := actions.EthereumNetworkConfigFromConfig(l, &config)
+	require.NoError(t, err, "Error building ethereum network config")
 
-func setupUpgradeTest(t *testing.T) (
-	testEnvironment *environment.Environment,
-	testNetwork blockchain.EVMNetwork,
-) {
-	testNetwork = networks.SelectedNetwork
-	evmConfig := ethereum.New(nil)
-	if !testNetwork.Simulated {
-		evmConfig = ethereum.New(&ethereum.Props{
-			NetworkName: testNetwork.Name,
-			Simulated:   testNetwork.Simulated,
-			WsURLs:      testNetwork.URLs,
-		})
-	}
-	charts, err := chainlink.NewDeployment(1, map[string]any{
-		"toml": client.AddNetworksConfig(config.BaseOCRP2PV1Config, testNetwork),
-		"db": map[string]any{
-			"stateful": true,
-		},
-	})
-	require.NoError(t, err, "Error creating chainlink deployments")
-	testEnvironment = environment.New(&environment.Config{
-		NamespacePrefix: fmt.Sprintf("upgrade-version-%s", strings.ReplaceAll(strings.ToLower(testNetwork.Name), " ", "-")),
-		Test:            t,
-	}).
-		AddHelm(evmConfig).
-		AddHelmCharts(charts)
-	err = testEnvironment.Run()
-	require.NoError(t, err, "Error launching test environment")
-	return testEnvironment, testNetwork
+	env, err := test_env.NewCLTestEnvBuilder().
+		WithTestConfig(&config).
+		WithTestInstance(t).
+		WithStandardCleanup().
+		WithPrivateEthereumNetwork(privateNetwork.EthereumNetworkConfig).
+		WithCLNodes(1).
+		WithStandardCleanup().
+		WithSeth().
+		Build()
+	require.NoError(t, err)
+
+	// just restarting CL container with the same name, DB is still the same
+	//
+	// [Database]
+	// MigrateOnStartup = true
+	//
+	// by default
+	err = env.ClCluster.Nodes[0].UpgradeVersion(*config.ChainlinkUpgradeImage.Image, *config.ChainlinkUpgradeImage.Version)
+	require.NoError(t, err)
+
 }

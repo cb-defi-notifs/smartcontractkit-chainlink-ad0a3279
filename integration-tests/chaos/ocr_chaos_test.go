@@ -1,37 +1,38 @@
 package chaos
 
 import (
-	"context"
 	"fmt"
 	"math/big"
-	"os"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zapcore"
 
-	"github.com/smartcontractkit/chainlink-env/chaos"
-	"github.com/smartcontractkit/chainlink-env/environment"
-	a "github.com/smartcontractkit/chainlink-env/pkg/alias"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/mockserver"
-	mockservercfg "github.com/smartcontractkit/chainlink-env/pkg/helm/mockserver-cfg"
-	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
 	ctfClient "github.com/smartcontractkit/chainlink-testing-framework/client"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils"
+	ctf_config "github.com/smartcontractkit/chainlink-testing-framework/config"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/chaos"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/environment"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/chainlink"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/ethereum"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/mockserver"
+	mockservercfg "github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/mockserver-cfg"
+	"github.com/smartcontractkit/chainlink-testing-framework/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/networks"
+	"github.com/smartcontractkit/chainlink-testing-framework/utils/ptr"
+	seth_utils "github.com/smartcontractkit/chainlink-testing-framework/utils/seth"
+	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
 
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
+	actions_seth "github.com/smartcontractkit/chainlink/integration-tests/actions/seth"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
-	"github.com/smartcontractkit/chainlink/integration-tests/config"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
-	"github.com/smartcontractkit/chainlink/integration-tests/networks"
+	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
 )
 
 var (
 	defaultOCRSettings = map[string]interface{}{
-		"replicas": "6",
+		"replicas": 6,
 		"db": map[string]interface{}{
 			"stateful": true,
 			"capacity": "1Gi",
@@ -51,14 +52,24 @@ var (
 	chaosEndRound   int64 = 4
 )
 
-func TestMain(m *testing.M) {
-	defaultOCRSettings["toml"] = client.AddNetworksConfig(config.BaseOCRP2PV1Config, networks.SelectedNetwork)
-	os.Exit(m.Run())
+func getDefaultOcrSettings(config *tc.TestConfig) map[string]interface{} {
+	defaultOCRSettings["toml"] = networks.AddNetworksConfig(baseTOML, config.Pyroscope, networks.MustGetSelectedNetworkConfig(config.Network)[0])
+	return defaultAutomationSettings
 }
 
 func TestOCRChaos(t *testing.T) {
 	t.Parallel()
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
+	config, err := tc.GetConfig("Chaos", tc.OCR)
+	require.NoError(t, err, "Error getting config")
+
+	var overrideFn = func(_ interface{}, target interface{}) {
+		ctf_config.MustConfigOverrideChainlinkVersion(config.GetChainlinkImageConfig(), target)
+		ctf_config.MightConfigOverridePyroscopeKey(config.GetPyroscopeConfig(), target)
+	}
+
+	chainlinkCfg := chainlink.NewWithOverride(0, getDefaultOcrSettings(&config), config.ChainlinkImage, overrideFn)
+
 	testCases := map[string]struct {
 		networkChart environment.ConnectedChart
 		clChart      environment.ConnectedChart
@@ -74,53 +85,53 @@ func TestOCRChaos(t *testing.T) {
 		// and chaos.NewNetworkPartition method (https://chaos-mesh.org/docs/simulate-network-chaos-on-kubernetes/)
 		// in order to regenerate Go bindings if k8s version will be updated
 		// you can pull new CRD spec from your current cluster and check README here
-		// https://github.com/smartcontractkit/chainlink-env/blob/master/README.md
+		// https://github.com/smartcontractkit/chainlink-testing-framework/k8s/blob/master/README.md
 		NetworkChaosFailMajorityNetwork: {
 			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
+			chainlinkCfg,
 			chaos.NewNetworkPartition,
 			&chaos.Props{
-				FromLabels:  &map[string]*string{ChaosGroupMajority: a.Str("1")},
-				ToLabels:    &map[string]*string{ChaosGroupMinority: a.Str("1")},
+				FromLabels:  &map[string]*string{ChaosGroupMajority: ptr.Ptr("1")},
+				ToLabels:    &map[string]*string{ChaosGroupMinority: ptr.Ptr("1")},
 				DurationStr: "1m",
 			},
 		},
 		NetworkChaosFailBlockchainNode: {
 			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
+			chainlinkCfg,
 			chaos.NewNetworkPartition,
 			&chaos.Props{
-				FromLabels:  &map[string]*string{"app": a.Str("geth")},
-				ToLabels:    &map[string]*string{ChaosGroupMajorityPlus: a.Str("1")},
+				FromLabels:  &map[string]*string{"app": ptr.Ptr("geth")},
+				ToLabels:    &map[string]*string{ChaosGroupMajorityPlus: ptr.Ptr("1")},
 				DurationStr: "1m",
 			},
 		},
 		PodChaosFailMinorityNodes: {
 			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
+			chainlinkCfg,
 			chaos.NewFailPods,
 			&chaos.Props{
-				LabelsSelector: &map[string]*string{ChaosGroupMinority: a.Str("1")},
+				LabelsSelector: &map[string]*string{ChaosGroupMinority: ptr.Ptr("1")},
 				DurationStr:    "1m",
 			},
 		},
 		PodChaosFailMajorityNodes: {
 			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
+			chainlinkCfg,
 			chaos.NewFailPods,
 			&chaos.Props{
-				LabelsSelector: &map[string]*string{ChaosGroupMajority: a.Str("1")},
+				LabelsSelector: &map[string]*string{ChaosGroupMajority: ptr.Ptr("1")},
 				DurationStr:    "1m",
 			},
 		},
 		PodChaosFailMajorityDB: {
 			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
+			chainlinkCfg,
 			chaos.NewFailPods,
 			&chaos.Props{
-				LabelsSelector: &map[string]*string{ChaosGroupMajority: a.Str("1")},
+				LabelsSelector: &map[string]*string{ChaosGroupMajority: ptr.Ptr("1")},
 				DurationStr:    "1m",
-				ContainerNames: &[]*string{a.Str("chainlink-db")},
+				ContainerNames: &[]*string{ptr.Ptr("chainlink-db")},
 			},
 		},
 	}
@@ -145,46 +156,41 @@ func TestOCRChaos(t *testing.T) {
 				return
 			}
 
-			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 1, 2, ChaosGroupMinority)
+			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, "instance=node-", 1, 2, ChaosGroupMinority)
 			require.NoError(t, err)
-			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 3, 5, ChaosGroupMajority)
+			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, "instance=node-", 3, 5, ChaosGroupMajority)
 			require.NoError(t, err)
-			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 2, 5, ChaosGroupMajorityPlus)
+			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, "instance=node-", 2, 5, ChaosGroupMajorityPlus)
 			require.NoError(t, err)
 
-			chainClient, err := blockchain.NewEVMClient(blockchain.SimulatedEVMNetwork, testEnvironment)
-			require.NoError(t, err, "Connecting to blockchain nodes shouldn't fail")
-			cd, err := contracts.NewContractDeployer(chainClient)
-			require.NoError(t, err, "Deploying contracts shouldn't fail")
+			cfg := config.MustCopy().(tc.TestConfig)
+
+			network := networks.MustGetSelectedNetworkConfig(cfg.GetNetworkConfig())[0]
+			network = seth_utils.MustReplaceSimulatedNetworkUrlWithK8(l, network, *testEnvironment)
+
+			seth, err := actions_seth.GetChainClient(&cfg, network)
+			require.NoError(t, err, "Error creating seth client")
 
 			chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
 			require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
 			bootstrapNode, workerNodes := chainlinkNodes[0], chainlinkNodes[1:]
 			t.Cleanup(func() {
-				if chainClient != nil {
-					chainClient.GasStats().PrintStats()
-				}
-				err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.PanicLevel, chainClient)
+				err := actions_seth.TeardownRemoteSuite(t, seth, testEnvironment.Cfg.Namespace, chainlinkNodes, nil, &cfg)
 				require.NoError(t, err, "Error tearing down environment")
 			})
 
 			ms, err := ctfClient.ConnectMockServer(testEnvironment)
 			require.NoError(t, err, "Creating mockserver clients shouldn't fail")
 
-			chainClient.ParallelTransactions(true)
+			linkContract, err := contracts.DeployLinkTokenContract(l, seth)
+			require.NoError(t, err, "Error deploying link token contract")
+
+			err = actions_seth.FundChainlinkNodesFromRootAddress(l, seth, contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(chainlinkNodes), big.NewFloat(10))
 			require.NoError(t, err)
 
-			lt, err := cd.DeployLinkTokenContract()
-			require.NoError(t, err, "Deploying Link Token Contract shouldn't fail")
-
-			err = actions.FundChainlinkNodes(chainlinkNodes, chainClient, big.NewFloat(10))
+			ocrInstances, err := actions_seth.DeployOCRv1Contracts(l, seth, 1, common.HexToAddress(linkContract.Address()), contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(workerNodes))
 			require.NoError(t, err)
-
-			ocrInstances, err := actions.DeployOCRContracts(1, lt, cd, bootstrapNode, workerNodes, chainClient)
-			require.NoError(t, err)
-			err = chainClient.WaitForEvents()
-			require.NoError(t, err)
-			err = actions.CreateOCRJobs(ocrInstances, bootstrapNode, workerNodes, 5, ms)
+			err = actions.CreateOCRJobs(ocrInstances, bootstrapNode, workerNodes, 5, ms, fmt.Sprint(seth.ChainID))
 			require.NoError(t, err)
 
 			chaosApplied := false
@@ -195,7 +201,7 @@ func TestOCRChaos(t *testing.T) {
 					err := ocr.RequestNewRound()
 					require.NoError(t, err, "Error requesting new round")
 				}
-				round, err := ocrInstances[0].GetLatestRound(context.Background())
+				round, err := ocrInstances[0].GetLatestRound(testcontext.Get(t))
 				g.Expect(err).ShouldNot(gomega.HaveOccurred())
 				l.Info().Int64("RoundID", round.RoundId.Int64()).Msg("Latest OCR Round")
 				if round.RoundId.Int64() == chaosStartRound && !chaosApplied {

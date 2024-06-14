@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import "../../interfaces/LinkTokenInterface.sol";
-import "../VRFConsumerBase.sol";
+import {VRFConsumerBase} from "../VRFConsumerBase.sol";
 
 contract VRFConsumer is VRFConsumerBase {
   uint256 public randomnessOutput;

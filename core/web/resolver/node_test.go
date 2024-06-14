@@ -1,26 +1,22 @@
 package resolver
 
 import (
+	"context"
 	"testing"
 
 	gqlerrors "github.com/graph-gophers/graphql-go/errors"
 	"github.com/pkg/errors"
-	"github.com/stretchr/testify/mock"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
-
-	v2 "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/v2"
-	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
-	"github.com/smartcontractkit/chainlink/v2/core/store/models"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/smartcontractkit/chainlink-common/pkg/loop"
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
+	chainlinkmocks "github.com/smartcontractkit/chainlink/v2/core/services/chainlink/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/web/testutils"
 )
 
 func TestResolver_Nodes(t *testing.T) {
 	t.Parallel()
 
 	var (
-		chainID = *utils.NewBigI(1)
-
 		query = `
 			query GetNodes {
 				nodes {
@@ -44,17 +40,24 @@ func TestResolver_Nodes(t *testing.T) {
 		{
 			name:          "success",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
-				f.App.On("GetChains").Return(chainlink.Chains{EVM: f.Mocks.chainSet})
-				f.Mocks.chainSet.On("NodeStatuses", mock.Anything, PageDefaultOffset, PageDefaultLimit).Return([]types.NodeStatus{
-					{
-						Name:    "node-name",
-						ChainID: chainID.String(),
-						Config:  `Name = 'node-name'`,
+			before: func(ctx context.Context, f *gqlTestFramework) {
+				f.App.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{
+					Nodes: []types.NodeStatus{
+						{
+							ChainID: "1",
+							Name:    "node-name",
+							Config:  "Name='node-name'\nOrder=11\nHTTPURL='http://some-url'\nWSURL='ws://some-url'",
+							State:   "alive",
+						},
 					},
-				}, 1, nil)
-				f.App.On("EVMORM").Return(f.Mocks.evmORM)
-				f.Mocks.evmORM.PutChains(v2.EVMConfig{ChainID: &chainID})
+					Relayers: []loop.Relayer{
+						testutils.MockRelayer{ChainStatus: types.ChainStatus{
+							ID:      "1",
+							Enabled: true,
+							Config:  "",
+						}},
+					},
+				})
 			},
 			query: query,
 			result: `
@@ -76,9 +79,9 @@ func TestResolver_Nodes(t *testing.T) {
 		{
 			name:          "generic error",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
-				f.Mocks.chainSet.On("NodeStatuses", mock.Anything, PageDefaultOffset, PageDefaultLimit).Return([]types.NodeStatus{}, 0, gError)
-				f.App.On("GetChains").Return(chainlink.Chains{EVM: f.Mocks.chainSet})
+			before: func(ctx context.Context, f *gqlTestFramework) {
+				f.Mocks.relayerChainInterops.NodesErr = gError
+				f.App.On("GetRelayers").Return(f.Mocks.relayerChainInterops)
 			},
 			query:  query,
 			result: `null`,
@@ -115,21 +118,20 @@ func Test_NodeQuery(t *testing.T) {
 			}
 		}`
 
-	var name = "node-name"
-
 	testCases := []GQLTestCase{
 		unauthorizedTestCase(GQLTestCase{query: query}, "node"),
 		{
 			name:          "success",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
-				f.App.On("EVMORM").Return(f.Mocks.evmORM)
-				f.Mocks.evmORM.PutChains(v2.EVMConfig{Nodes: []*v2.Node{{
-					Name:    &name,
-					WSURL:   models.MustParseURL("ws://some-url"),
-					HTTPURL: models.MustParseURL("http://some-url"),
-					Order:   ptr(int32(11)),
-				}}})
+			before: func(ctx context.Context, f *gqlTestFramework) {
+				f.App.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: []loop.Relayer{
+					testutils.MockRelayer{NodeStatuses: []types.NodeStatus{
+						{
+							Name:   "node-name",
+							Config: "Name='node-name'\nOrder=11\nHTTPURL='http://some-url'\nWSURL='ws://some-url'",
+						},
+					}},
+				}})
 			},
 			query: query,
 			result: `
@@ -145,8 +147,8 @@ func Test_NodeQuery(t *testing.T) {
 		{
 			name:          "not found error",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
-				f.App.On("EVMORM").Return(f.Mocks.evmORM)
+			before: func(ctx context.Context, f *gqlTestFramework) {
+				f.App.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: []loop.Relayer{}})
 			},
 			query: query,
 			result: `
@@ -161,5 +163,3 @@ func Test_NodeQuery(t *testing.T) {
 
 	RunGQLTests(t, testCases)
 }
-
-func ptr[T any](t T) *T { return &t }

@@ -13,22 +13,25 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 
-	clienttypes "github.com/smartcontractkit/chainlink/v2/common/chains/client"
-	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils"
+
+	commonclient "github.com/smartcontractkit/chainlink/v2/common/client"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 var _ TxmClient = (*evmTxmClient)(nil)
 
 type evmTxmClient struct {
-	client evmclient.Client
+	client       client.Client
+	clientErrors config.ClientErrors
 }
 
-func NewEvmTxmClient(c evmclient.Client) *evmTxmClient {
-	return &evmTxmClient{client: c}
+func NewEvmTxmClient(c client.Client, clientErrors config.ClientErrors) *evmTxmClient {
+	return &evmTxmClient{client: c, clientErrors: clientErrors}
 }
 
 func (c *evmTxmClient) PendingSequenceAt(ctx context.Context, addr common.Address) (evmtypes.Nonce, error) {
@@ -39,12 +42,23 @@ func (c *evmTxmClient) ConfiguredChainID() *big.Int {
 	return c.client.ConfiguredChainID()
 }
 
-func (c *evmTxmClient) BatchSendTransactions(ctx context.Context, updateBroadcastTime func(now time.Time, txIDs []int64) error, attempts []TxAttempt, batchSize int, lggr logger.Logger) (codes []clienttypes.SendTxReturnCode, txErrs []error, err error) {
+func (c *evmTxmClient) BatchSendTransactions(
+	ctx context.Context,
+	attempts []TxAttempt,
+	batchSize int,
+	lggr logger.SugaredLogger,
+) (
+	codes []commonclient.SendTxReturnCode,
+	txErrs []error,
+	broadcastTime time.Time,
+	successfulTxIDs []int64,
+	err error,
+) {
 	// preallocate
-	codes = make([]clienttypes.SendTxReturnCode, len(attempts))
+	codes = make([]commonclient.SendTxReturnCode, len(attempts))
 	txErrs = make([]error, len(attempts))
 
-	reqs, batchErr := batchSendTransactions(ctx, updateBroadcastTime, attempts, batchSize, lggr, c.client)
+	reqs, broadcastTime, successfulTxIDs, batchErr := batchSendTransactions(ctx, attempts, batchSize, lggr, c.client)
 	err = errors.Join(err, batchErr) // this error does not block processing
 
 	// safety check - exits before processing
@@ -66,10 +80,14 @@ func (c *evmTxmClient) BatchSendTransactions(ctx context.Context, updateBroadcas
 			// convert to tx for logging purposes - exits early if error occurs
 			tx, signedErr := GetGethSignedTx(attempts[i].SignedRawTx)
 			if signedErr != nil {
-				processingErr[i] = fmt.Errorf("failed to process tx (index %d): %w", i, signedErr)
+				signedErrMsg := fmt.Sprintf("failed to process tx (index %d)", i)
+				lggr.Errorw(signedErrMsg, "err", signedErr)
+				processingErr[i] = fmt.Errorf("%s: %w", signedErrMsg, signedErr)
 				return
 			}
-			codes[i], txErrs[i] = evmclient.NewSendErrorReturnCode(reqs[i].Error, lggr, tx, attempts[i].Tx.FromAddress, c.client.IsL2())
+			sendErr := reqs[i].Error
+			codes[i] = client.ClassifySendError(sendErr, c.clientErrors, lggr, tx, attempts[i].Tx.FromAddress, c.client.IsL2())
+			txErrs[i] = sendErr
 		}(index)
 	}
 	wg.Wait()
@@ -77,11 +95,11 @@ func (c *evmTxmClient) BatchSendTransactions(ctx context.Context, updateBroadcas
 	return
 }
 
-func (c *evmTxmClient) SendTransactionReturnCode(ctx context.Context, etx Tx, attempt TxAttempt, lggr logger.Logger) (clienttypes.SendTxReturnCode, error) {
+func (c *evmTxmClient) SendTransactionReturnCode(ctx context.Context, etx Tx, attempt TxAttempt, lggr logger.SugaredLogger) (commonclient.SendTxReturnCode, error) {
 	signedTx, err := GetGethSignedTx(attempt.SignedRawTx)
 	if err != nil {
 		lggr.Criticalw("Fatal error signing transaction", "err", err, "etx", etx)
-		return clienttypes.Fatal, err
+		return commonclient.Fatal, err
 	}
 	return c.client.SendTransactionReturnCode(ctx, signedTx, etx.FromAddress)
 }
@@ -129,15 +147,15 @@ func (c *evmTxmClient) BatchGetReceipts(ctx context.Context, attempts []TxAttemp
 // May be useful for clearing stuck nonces
 func (c *evmTxmClient) SendEmptyTransaction(
 	ctx context.Context,
-	newTxAttempt func(seq evmtypes.Nonce, feeLimit uint32, fee gas.EvmFee, fromAddress common.Address) (attempt TxAttempt, err error),
+	newTxAttempt func(ctx context.Context, seq evmtypes.Nonce, feeLimit uint64, fee gas.EvmFee, fromAddress common.Address) (attempt TxAttempt, err error),
 	seq evmtypes.Nonce,
-	gasLimit uint32,
+	gasLimit uint64,
 	fee gas.EvmFee,
 	fromAddress common.Address,
 ) (txhash string, err error) {
 	defer utils.WrapIfError(&err, "sendEmptyTransaction failed")
 
-	attempt, err := newTxAttempt(seq, gasLimit, fee, fromAddress)
+	attempt, err := newTxAttempt(ctx, seq, gasLimit, fee, fromAddress)
 	if err != nil {
 		return txhash, err
 	}
@@ -155,7 +173,7 @@ func (c *evmTxmClient) CallContract(ctx context.Context, a TxAttempt, blockNumbe
 	_, errCall := c.client.CallContract(ctx, ethereum.CallMsg{
 		From:       a.Tx.FromAddress,
 		To:         &a.Tx.ToAddress,
-		Gas:        uint64(a.Tx.FeeLimit),
+		Gas:        a.Tx.FeeLimit,
 		GasPrice:   a.TxFee.Legacy.ToInt(),
 		GasFeeCap:  a.TxFee.DynamicFeeCap.ToInt(),
 		GasTipCap:  a.TxFee.DynamicTipCap.ToInt(),
@@ -163,5 +181,5 @@ func (c *evmTxmClient) CallContract(ctx context.Context, a TxAttempt, blockNumbe
 		Data:       a.Tx.EncodedPayload,
 		AccessList: nil,
 	}, blockNumber)
-	return evmclient.ExtractRPCError(errCall)
+	return client.ExtractRPCError(errCall)
 }

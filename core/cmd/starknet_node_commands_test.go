@@ -6,18 +6,18 @@ import (
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/smartcontractkit/chainlink-relay/pkg/utils"
-	"github.com/smartcontractkit/chainlink-starknet/relayer/pkg/chainlink/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/starknet"
+	commoncfg "github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-starknet/relayer/pkg/chainlink/config"
+
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 )
 
-func starknetStartNewApplication(t *testing.T, cfgs ...*starknet.StarknetConfig) *cltest.TestApplication {
+func starknetStartNewApplication(t *testing.T, cfgs ...*config.TOMLConfig) *cltest.TestApplication {
 	for i := range cfgs {
 		cfgs[i].SetDefaults()
 	}
@@ -34,15 +34,15 @@ func TestShell_IndexStarkNetNodes(t *testing.T) {
 	id := "starknet chain ID"
 	node1 := config.Node{
 		Name: ptr("first"),
-		URL:  utils.MustParseURL("https://starknet1.example"),
+		URL:  commoncfg.MustParseURL("https://starknet1.example"),
 	}
 	node2 := config.Node{
 		Name: ptr("second"),
-		URL:  utils.MustParseURL("https://starknet2.example"),
+		URL:  commoncfg.MustParseURL("https://starknet2.example"),
 	}
-	chain := starknet.StarknetConfig{
+	chain := config.TOMLConfig{
 		ChainID: &id,
-		Nodes:   starknet.StarknetNodes{&node1, &node2},
+		Nodes:   config.Nodes{&node1, &node2},
 	}
 	app := starknetStartNewApplication(t, &chain)
 	client, r := app.NewShellAndRenderer()
@@ -54,13 +54,13 @@ func TestShell_IndexStarkNetNodes(t *testing.T) {
 	n1 := nodes[0]
 	n2 := nodes[1]
 	assert.Equal(t, id, n1.ChainID)
-	assert.Equal(t, *node1.Name, n1.ID)
+	assert.Equal(t, cltest.FormatWithPrefixedChainID(id, *node1.Name), n1.ID)
 	assert.Equal(t, *node1.Name, n1.Name)
 	wantConfig, err := toml.Marshal(node1)
 	require.NoError(t, err)
 	assert.Equal(t, string(wantConfig), n1.Config)
 	assert.Equal(t, id, n2.ChainID)
-	assert.Equal(t, *node2.Name, n2.ID)
+	assert.Equal(t, cltest.FormatWithPrefixedChainID(id, *node2.Name), n2.ID)
 	assert.Equal(t, *node2.Name, n2.Name)
 	wantConfig2, err := toml.Marshal(node2)
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestShell_IndexStarkNetNodes(t *testing.T) {
 	//Render table and check the fields order
 	b := new(bytes.Buffer)
 	rt := cmd.RendererTable{b}
-	nodes.RenderTable(rt)
+	require.NoError(t, nodes.RenderTable(rt))
 	renderLines := strings.Split(b.String(), "\n")
 	assert.Equal(t, 17, len(renderLines))
 	assert.Contains(t, renderLines[2], "Name")

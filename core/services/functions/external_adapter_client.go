@@ -10,12 +10,13 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/hex"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 // ExternalAdapterClient supports two endpoints:
@@ -33,6 +34,7 @@ type ExternalAdapterClient interface {
 		jobName string,
 		subscriptionOwner string,
 		subscriptionId uint64,
+		flags RequestFlags,
 		nodeProvidedSecrets string,
 		requestData *RequestData,
 	) (userResult, userError []byte, domains []string, err error)
@@ -41,21 +43,25 @@ type ExternalAdapterClient interface {
 }
 
 type externalAdapterClient struct {
-	adapterURL       url.URL
-	maxResponseBytes int64
+	adapterURL             url.URL
+	maxResponseBytes       int64
+	maxRetries             int
+	exponentialBackoffBase time.Duration
 }
 
 var _ ExternalAdapterClient = (*externalAdapterClient)(nil)
 
 //go:generate mockery --quiet --name BridgeAccessor --output ./mocks/ --case=underscore
 type BridgeAccessor interface {
-	NewExternalAdapterClient() (ExternalAdapterClient, error)
+	NewExternalAdapterClient(context.Context) (ExternalAdapterClient, error)
 }
 
 type bridgeAccessor struct {
-	bridgeORM        bridges.ORM
-	bridgeName       string
-	maxResponseBytes int64
+	bridgeORM              bridges.ORM
+	bridgeName             string
+	maxResponseBytes       int64
+	maxRetries             int
+	exponentialBackoffBase time.Duration
 }
 
 var _ BridgeAccessor = (*bridgeAccessor)(nil)
@@ -66,6 +72,7 @@ type requestPayload struct {
 	JobName             string       `json:"jobName"`
 	SubscriptionOwner   string       `json:"subscriptionOwner"`
 	SubscriptionId      uint64       `json:"subscriptionId"`
+	Flags               RequestFlags `json:"flags"` // marshalled as an array of numbers
 	NodeProvidedSecrets string       `json:"nodeProvidedSecrets"`
 	Data                *RequestData `json:"data"`
 }
@@ -110,10 +117,12 @@ var (
 	)
 )
 
-func NewExternalAdapterClient(adapterURL url.URL, maxResponseBytes int64) ExternalAdapterClient {
+func NewExternalAdapterClient(adapterURL url.URL, maxResponseBytes int64, maxRetries int, exponentialBackoffBase time.Duration) ExternalAdapterClient {
 	return &externalAdapterClient{
-		adapterURL:       adapterURL,
-		maxResponseBytes: maxResponseBytes,
+		adapterURL:             adapterURL,
+		maxResponseBytes:       maxResponseBytes,
+		maxRetries:             maxRetries,
+		exponentialBackoffBase: exponentialBackoffBase,
 	}
 }
 
@@ -123,9 +132,11 @@ func (ea *externalAdapterClient) RunComputation(
 	jobName string,
 	subscriptionOwner string,
 	subscriptionId uint64,
+	flags RequestFlags,
 	nodeProvidedSecrets string,
 	requestData *RequestData,
 ) (userResult, userError []byte, domains []string, err error) {
+	requestData.Secrets = nil // secrets are passed in nodeProvidedSecrets
 
 	payload := requestPayload{
 		Endpoint:            "lambda",
@@ -133,6 +144,7 @@ func (ea *externalAdapterClient) RunComputation(
 		JobName:             jobName,
 		SubscriptionOwner:   subscriptionOwner,
 		SubscriptionId:      subscriptionId,
+		Flags:               flags,
 		NodeProvidedSecrets: nodeProvidedSecrets,
 		Data:                requestData,
 	}
@@ -185,7 +197,13 @@ func (ea *externalAdapterClient) request(
 	req.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
-	client := &http.Client{}
+
+	// retry will only happen on a 5XX error response code (except 501)
+	retryClient := retryablehttp.NewClient()
+	retryClient.RetryMax = ea.maxRetries
+	retryClient.RetryWaitMin = ea.exponentialBackoffBase
+
+	client := retryClient.StandardClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		promEAClientErrors.WithLabelValues(label).Inc()
@@ -223,13 +241,13 @@ func (ea *externalAdapterClient) request(
 
 	switch eaResp.Result {
 	case "error":
-		userError, err = utils.TryParseHex(eaResp.Data.Error)
+		userError, err = hex.DecodeString(eaResp.Data.Error)
 		if err != nil {
 			return nil, nil, nil, errors.Wrap(err, "error decoding userError hex string")
 		}
 		return nil, userError, eaResp.Data.Domains, nil
 	case "success":
-		userResult, err = utils.TryParseHex(eaResp.Data.Result)
+		userResult, err = hex.DecodeString(eaResp.Data.Result)
 		if err != nil {
 			return nil, nil, nil, errors.Wrap(err, "error decoding result hex string")
 		}
@@ -239,18 +257,20 @@ func (ea *externalAdapterClient) request(
 	}
 }
 
-func NewBridgeAccessor(bridgeORM bridges.ORM, bridgeName string, maxResponseBytes int64) BridgeAccessor {
+func NewBridgeAccessor(bridgeORM bridges.ORM, bridgeName string, maxResponseBytes int64, maxRetries int, exponentialBackoffBase time.Duration) BridgeAccessor {
 	return &bridgeAccessor{
-		bridgeORM:        bridgeORM,
-		bridgeName:       bridgeName,
-		maxResponseBytes: maxResponseBytes,
+		bridgeORM:              bridgeORM,
+		bridgeName:             bridgeName,
+		maxResponseBytes:       maxResponseBytes,
+		maxRetries:             maxRetries,
+		exponentialBackoffBase: exponentialBackoffBase,
 	}
 }
 
-func (b *bridgeAccessor) NewExternalAdapterClient() (ExternalAdapterClient, error) {
-	bridge, err := b.bridgeORM.FindBridge(bridges.BridgeName(b.bridgeName))
+func (b *bridgeAccessor) NewExternalAdapterClient(ctx context.Context) (ExternalAdapterClient, error) {
+	bridge, err := b.bridgeORM.FindBridge(ctx, bridges.BridgeName(b.bridgeName))
 	if err != nil {
 		return nil, err
 	}
-	return NewExternalAdapterClient(url.URL(bridge.URL), b.maxResponseBytes), nil
+	return NewExternalAdapterClient(url.URL(bridge.URL), b.maxResponseBytes, b.maxRetries, b.exponentialBackoffBase), nil
 }

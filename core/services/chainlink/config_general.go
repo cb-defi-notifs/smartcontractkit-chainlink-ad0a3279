@@ -3,8 +3,6 @@ package chainlink
 import (
 	_ "embed"
 	"fmt"
-	"math/big"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,16 +13,17 @@ import (
 	"go.uber.org/multierr"
 	"go.uber.org/zap/zapcore"
 
-	ocrnetworking "github.com/smartcontractkit/libocr/networking"
+	coscfg "github.com/smartcontractkit/chainlink-cosmos/pkg/cosmos/config"
+	solcfg "github.com/smartcontractkit/chainlink-solana/pkg/solana/config"
+	starknet "github.com/smartcontractkit/chainlink-starknet/relayer/pkg/chainlink/config"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/cosmos"
-	evmcfg "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/v2"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/solana"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/starknet"
+	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+	evmcfg "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
 	coreconfig "github.com/smartcontractkit/chainlink/v2/core/config"
+	"github.com/smartcontractkit/chainlink/v2/core/config/env"
 	"github.com/smartcontractkit/chainlink/v2/core/config/parse"
-	v2 "github.com/smartcontractkit/chainlink/v2/core/config/v2"
+	v2 "github.com/smartcontractkit/chainlink/v2/core/config/toml"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/p2pkey"
 	"github.com/smartcontractkit/chainlink/v2/core/store/models"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
@@ -34,10 +33,12 @@ import (
 type generalConfig struct {
 	inputTOML     string // user input, normalized via de/re-serialization
 	effectiveTOML string // with default values included
-	secretsTOML   string // with env overdies includes, redacted
+	secretsTOML   string // with env overrides includes, redacted
 
 	c       *Config // all fields non-nil (unless the legacy method signature return a pointer)
 	secrets *Secrets
+
+	warning error // warnings about inputTOML, e.g. deprecated fields
 
 	logLevelDefault zapcore.Level
 
@@ -52,8 +53,8 @@ type generalConfig struct {
 //
 // See ParseTOML to initilialize Config and Secrets from TOML.
 type GeneralConfigOpts struct {
-	ConfigStrings []string
-	SecretsString string
+	ConfigStrings  []string
+	SecretsStrings []string
 
 	Config
 	Secrets
@@ -64,10 +65,39 @@ type GeneralConfigOpts struct {
 	SkipEnv bool
 }
 
+func (o *GeneralConfigOpts) Setup(configFiles []string, secretsFiles []string) error {
+	configs := []string{}
+	for _, fileName := range configFiles {
+		b, err := os.ReadFile(fileName)
+		if err != nil {
+			return errors.Wrapf(err, "failed to read config file: %s", fileName)
+		}
+		configs = append(configs, string(b))
+	}
+
+	if configTOML := env.Config.Get(); configTOML != "" {
+		configs = append(configs, configTOML)
+	}
+
+	o.ConfigStrings = configs
+
+	secrets := []string{}
+	for _, fileName := range secretsFiles {
+		b, err := os.ReadFile(fileName)
+		if err != nil {
+			return errors.Wrapf(err, "failed to read secrets file: %s", fileName)
+		}
+		secrets = append(secrets, string(b))
+	}
+
+	o.SecretsStrings = secrets
+	return nil
+}
+
 // parseConfig sets Config from the given TOML string, overriding any existing duplicate Config fields.
 func (o *GeneralConfigOpts) parseConfig(config string) error {
 	var c Config
-	if err2 := v2.DecodeTOML(strings.NewReader(config), &c); err2 != nil {
+	if err2 := commonconfig.DecodeTOML(strings.NewReader(config), &c); err2 != nil {
 		return fmt.Errorf("failed to decode config TOML: %w", err2)
 	}
 
@@ -78,34 +108,34 @@ func (o *GeneralConfigOpts) parseConfig(config string) error {
 	return nil
 }
 
-// parseSecrets sets Secrets from the given TOML string.
-func (o *GeneralConfigOpts) parseSecrets() (err error) {
-	if err2 := v2.DecodeTOML(strings.NewReader(o.SecretsString), &o.Secrets); err2 != nil {
+// parseSecrets sets Secrets from the given TOML string. Errors on overrides
+func (o *GeneralConfigOpts) parseSecrets(secrets string) error {
+	var s Secrets
+	if err2 := commonconfig.DecodeTOML(strings.NewReader(secrets), &s); err2 != nil {
 		return fmt.Errorf("failed to decode secrets TOML: %w", err2)
 	}
+
+	// merge fields and err on overrides
+	if err4 := o.Secrets.SetFrom(&s); err4 != nil {
+		return fmt.Errorf("invalid secrets: %w", err4)
+	}
+
 	return nil
 }
 
-// New returns a coreconfig.GeneralConfig for the given options.
+// New returns a GeneralConfig for the given options.
 func (o GeneralConfigOpts) New() (GeneralConfig, error) {
-	for _, c := range o.ConfigStrings {
-		err := o.parseConfig(c)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if o.SecretsString != "" {
-		err := o.parseSecrets()
-		if err != nil {
-			return nil, err
-		}
+	err := o.parse()
+	if err != nil {
+		return nil, err
 	}
 
 	input, err := o.Config.TOMLString()
 	if err != nil {
 		return nil, err
 	}
+
+	_, warning := commonconfig.MultiErrorList(o.Config.warnings())
 
 	o.Config.setDefaults()
 	if !o.SkipEnv {
@@ -135,6 +165,7 @@ func (o GeneralConfigOpts) New() (GeneralConfig, error) {
 		secretsTOML:   secrets,
 		c:             &o.Config,
 		secrets:       &o.Secrets,
+		warning:       warning,
 	}
 	if lvl := o.Config.Log.Level; lvl != nil {
 		cfg.logLevelDefault = zapcore.Level(*lvl)
@@ -143,19 +174,38 @@ func (o GeneralConfigOpts) New() (GeneralConfig, error) {
 	return cfg, nil
 }
 
+func (o *GeneralConfigOpts) parse() (err error) {
+	for _, c := range o.ConfigStrings {
+		err := o.parseConfig(c)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, s := range o.SecretsStrings {
+		err := o.parseSecrets(s)
+		if err != nil {
+			return err
+		}
+	}
+
+	o.Secrets.setDefaults()
+	return
+}
+
 func (g *generalConfig) EVMConfigs() evmcfg.EVMConfigs {
 	return g.c.EVM
 }
 
-func (g *generalConfig) CosmosConfigs() cosmos.CosmosConfigs {
+func (g *generalConfig) CosmosConfigs() coscfg.TOMLConfigs {
 	return g.c.Cosmos
 }
 
-func (g *generalConfig) SolanaConfigs() solana.SolanaConfigs {
+func (g *generalConfig) SolanaConfigs() solcfg.TOMLConfigs {
 	return g.c.Solana
 }
 
-func (g *generalConfig) StarknetConfigs() starknet.StarknetConfigs {
+func (g *generalConfig) StarknetConfigs() starknet.TOMLConfigs {
 	return g.c.Starknet
 }
 
@@ -170,7 +220,7 @@ func (g *generalConfig) validate(secretsValidationFn func() error) error {
 		secretsValidationFn(),
 	)
 
-	_, errList := utils.MultiErrorList(err)
+	_, errList := commonconfig.MultiErrorList(err)
 	return errList
 }
 
@@ -185,7 +235,7 @@ var emptyStringsEnv string
 func validateEnv() (err error) {
 	defer func() {
 		if err != nil {
-			_, err = utils.MultiErrorList(err)
+			_, err = commonconfig.MultiErrorList(err)
 			err = fmt.Errorf("invalid environment: %w", err)
 		}
 	}()
@@ -206,10 +256,13 @@ func validateEnv() (err error) {
 	return
 }
 
-func (g *generalConfig) LogConfiguration(log coreconfig.LogfFn) {
+func (g *generalConfig) LogConfiguration(log, warn coreconfig.LogfFn) {
 	log("# Secrets:\n%s\n", g.secretsTOML)
 	log("# Input Configuration:\n%s\n", g.inputTOML)
 	log("# Effective Configuration, with defaults applied:\n%s\n", g.effectiveTOML)
+	if g.warning != nil {
+		warn("# Configuration warning:\n%s\n", g.warning)
+	}
 }
 
 // ConfigTOML implements chainlink.ConfigV2
@@ -265,15 +318,6 @@ func (g *generalConfig) EVMRPCEnabled() bool {
 	return false
 }
 
-func (g *generalConfig) DefaultChainID() *big.Int {
-	for _, c := range g.c.EVM {
-		if c.IsEnabled() {
-			return (*big.Int)(c.ChainID)
-		}
-	}
-	return nil
-}
-
 func (g *generalConfig) SolanaEnabled() bool {
 	for _, c := range g.c.Solana {
 		if c.IsEnabled() {
@@ -302,7 +346,7 @@ func (g *generalConfig) StarkNetEnabled() bool {
 }
 
 func (g *generalConfig) WebServer() config.WebServer {
-	return &webServerConfig{c: g.c.WebServer, rootDir: g.RootDir}
+	return &webServerConfig{c: g.c.WebServer, s: g.secrets.WebServer, rootDir: g.RootDir}
 }
 
 func (g *generalConfig) AutoPprofBlockProfileRate() int {
@@ -313,12 +357,12 @@ func (g *generalConfig) AutoPprofCPUProfileRate() int {
 	return int(*g.c.AutoPprof.CPUProfileRate)
 }
 
-func (g *generalConfig) AutoPprofGatherDuration() models.Duration {
-	return models.MustMakeDuration(g.c.AutoPprof.GatherDuration.Duration())
+func (g *generalConfig) AutoPprofGatherDuration() commonconfig.Duration {
+	return *commonconfig.MustNewDuration(g.c.AutoPprof.GatherDuration.Duration())
 }
 
-func (g *generalConfig) AutoPprofGatherTraceDuration() models.Duration {
-	return models.MustMakeDuration(g.c.AutoPprof.GatherTraceDuration.Duration())
+func (g *generalConfig) AutoPprofGatherTraceDuration() commonconfig.Duration {
+	return *commonconfig.MustNewDuration(g.c.AutoPprof.GatherTraceDuration.Duration())
 }
 
 func (g *generalConfig) AutoPprofGoroutineThreshold() int {
@@ -341,7 +385,7 @@ func (g *generalConfig) AutoPprofMutexProfileFraction() int {
 	return int(*g.c.AutoPprof.MutexProfileFraction)
 }
 
-func (g *generalConfig) AutoPprofPollInterval() models.Duration {
+func (g *generalConfig) AutoPprofPollInterval() commonconfig.Duration {
 	return *g.c.AutoPprof.PollInterval
 }
 
@@ -353,24 +397,16 @@ func (g *generalConfig) AutoPprofProfileRoot() string {
 	return s
 }
 
+func (g *generalConfig) Capabilities() config.Capabilities {
+	return &capabilitiesConfig{c: g.c.Capabilities}
+}
+
 func (g *generalConfig) Database() coreconfig.Database {
 	return &databaseConfig{c: g.c.Database, s: g.secrets.Secrets.Database, logSQL: g.logSQL}
 }
 
 func (g *generalConfig) ShutdownGracePeriod() time.Duration {
 	return g.c.ShutdownGracePeriod.Duration()
-}
-
-func (g *generalConfig) Explorer() config.Explorer {
-	return &explorerConfig{s: g.secrets.Explorer, explorerURL: g.c.ExplorerURL}
-}
-
-func (g *generalConfig) ExplorerURL() *url.URL {
-	u := (*url.URL)(g.c.ExplorerURL)
-	if *u == zeroURL {
-		u = nil
-	}
-	return u
 }
 
 func (g *generalConfig) FluxMonitor() config.FluxMonitor {
@@ -407,14 +443,6 @@ func (g *generalConfig) OCR2() config.OCR2 {
 
 func (g *generalConfig) P2P() config.P2P {
 	return &p2p{c: g.c.P2P}
-}
-
-func (g *generalConfig) P2PNetworkingStack() (n ocrnetworking.NetworkingStack) {
-	return g.c.P2P.NetworkStack()
-}
-
-func (g *generalConfig) P2PNetworkingStackRaw() string {
-	return g.c.P2P.NetworkStack().String()
 }
 
 func (g *generalConfig) P2PPeerID() p2pkey.PeerID {
@@ -473,14 +501,15 @@ func (g *generalConfig) Prometheus() coreconfig.Prometheus {
 }
 
 func (g *generalConfig) Mercury() coreconfig.Mercury {
-	return &mercuryConfig{s: g.secrets.Mercury}
+	return &mercuryConfig{c: g.c.Mercury, s: g.secrets.Mercury}
 }
 
 func (g *generalConfig) Threshold() coreconfig.Threshold {
 	return &thresholdConfig{s: g.secrets.Threshold}
 }
 
-var (
-	zeroURL        = url.URL{}
-	zeroSha256Hash = models.Sha256Hash{}
-)
+func (g *generalConfig) Tracing() coreconfig.Tracing {
+	return &tracingConfig{s: g.c.Tracing}
+}
+
+var zeroSha256Hash = models.Sha256Hash{}

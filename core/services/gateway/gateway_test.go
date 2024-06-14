@@ -7,10 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/gateway"
@@ -48,10 +50,14 @@ HandlerName = "dummy"
 [[dons]]
 DonId = "my_don_2"
 HandlerName = "dummy"
+
+[[dons.Members]]
+Name = "node one"
+Address = "0x0001020304050607080900010203040506070809"
 `)
 
 	lggr := logger.TestLogger(t)
-	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, lggr), lggr)
+	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, nil, lggr), lggr)
 	require.NoError(t, err)
 }
 
@@ -69,7 +75,7 @@ HandlerName = "dummy"
 `)
 
 	lggr := logger.TestLogger(t)
-	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, lggr), lggr)
+	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, nil, lggr), lggr)
 	require.Error(t, err)
 }
 
@@ -83,7 +89,7 @@ HandlerName = "no_such_handler"
 `)
 
 	lggr := logger.TestLogger(t)
-	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, lggr), lggr)
+	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, nil, lggr), lggr)
 	require.Error(t, err)
 }
 
@@ -97,8 +103,35 @@ SomeOtherField = "abcd"
 `)
 
 	lggr := logger.TestLogger(t)
-	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, lggr), lggr)
+	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, nil, lggr), lggr)
 	require.Error(t, err)
+}
+
+func TestGateway_NewGatewayFromConfig_InvalidNodeAddress(t *testing.T) {
+	t.Parallel()
+
+	tomlConfig := buildConfig(`
+[[dons]]
+HandlerName = "dummy"
+DonId = "my_don"
+
+[[dons.Members]]
+Name = "node one"
+Address = "0xnot_an_address"
+`)
+
+	lggr := logger.TestLogger(t)
+	_, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, tomlConfig), gateway.NewHandlerFactory(nil, nil, lggr), lggr)
+	require.Error(t, err)
+}
+
+func TestGateway_CleanStartAndClose(t *testing.T) {
+	t.Parallel()
+
+	lggr := logger.TestLogger(t)
+	gateway, err := gateway.NewGatewayFromConfig(parseTOMLConfig(t, buildConfig("")), gateway.NewHandlerFactory(nil, nil, lggr), lggr)
+	require.NoError(t, err)
+	servicetest.Run(t, gateway)
 }
 
 func requireJsonRPCResult(t *testing.T, response []byte, expectedId string, expectedResult string) {
@@ -120,6 +153,24 @@ func newGatewayWithMockHandler(t *testing.T) (gateway.Gateway, *handler_mocks.Ha
 	return gw, handler
 }
 
+func newSignedRequest(t *testing.T, messageId string, method string, donID string, payload []byte) []byte {
+	msg := &api.Message{
+		Body: api.MessageBody{
+			MessageId: messageId,
+			Method:    method,
+			DonId:     donID,
+			Payload:   payload,
+		},
+	}
+	privateKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	require.NoError(t, msg.Sign(privateKey))
+	codec := api.JsonRPCCodec{}
+	rawRequest, err := codec.EncodeRequest(msg)
+	require.NoError(t, err)
+	return rawRequest
+}
+
 func TestGateway_ProcessRequest_ParseError(t *testing.T) {
 	t.Parallel()
 
@@ -129,15 +180,22 @@ func TestGateway_ProcessRequest_ParseError(t *testing.T) {
 	require.Equal(t, 400, statusCode)
 }
 
+func TestGateway_ProcessRequest_MessageValidationError(t *testing.T) {
+	t.Parallel()
+
+	gw, _ := newGatewayWithMockHandler(t)
+	req := newSignedRequest(t, "abc", "request", "", []byte{})
+	response, statusCode := gw.ProcessRequest(testutils.Context(t), req)
+	requireJsonRPCError(t, response, "abc", -32700, "invalid DON ID length")
+	require.Equal(t, 400, statusCode)
+}
+
 func TestGateway_ProcessRequest_IncorrectDonId(t *testing.T) {
 	t.Parallel()
 
 	gw, _ := newGatewayWithMockHandler(t)
-	response, statusCode := gw.ProcessRequest(testutils.Context(t), []byte(`{"jsonrpc":"2.0", "id": "abc", "method": "request", "params": {}}`))
-	requireJsonRPCError(t, response, "abc", -32602, "unsupported DON ID")
-	require.Equal(t, 400, statusCode)
-
-	response, statusCode = gw.ProcessRequest(testutils.Context(t), []byte(`{"jsonrpc":"2.0", "id": "abc", "method": "request", "params": {"body": {"don_id": "bad"}}}`))
+	req := newSignedRequest(t, "abc", "request", "unknownDON", []byte{})
+	response, statusCode := gw.ProcessRequest(testutils.Context(t), req)
 	requireJsonRPCError(t, response, "abc", -32602, "unsupported DON ID")
 	require.Equal(t, 400, statusCode)
 }
@@ -151,13 +209,14 @@ func TestGateway_ProcessRequest_HandlerResponse(t *testing.T) {
 		callbackCh := args.Get(2).(chan<- handlers.UserCallbackPayload)
 		// echo back to sender with attached payload
 		msg.Body.Payload = []byte(`{"result":"OK"}`)
+		msg.Signature = ""
 		callbackCh <- handlers.UserCallbackPayload{Msg: msg, ErrCode: api.NoError, ErrMsg: ""}
 	})
 
-	response, statusCode := gw.ProcessRequest(testutils.Context(t),
-		[]byte(`{"jsonrpc":"2.0", "method": "request", "id": "abcd", "params": {"body":{"don_id": "testDON"}}}`))
+	req := newSignedRequest(t, "abcd", "request", "testDON", []byte{})
+	response, statusCode := gw.ProcessRequest(testutils.Context(t), req)
 	requireJsonRPCResult(t, response, "abcd",
-		`{"signature":"","body":{"message_id":"abcd","method":"request","don_id":"testDON","sender":"","payload":{"result":"OK"}}}`)
+		`{"signature":"","body":{"message_id":"abcd","method":"request","don_id":"testDON","receiver":"","payload":{"result":"OK"}}}`)
 	require.Equal(t, 200, statusCode)
 }
 
@@ -166,10 +225,11 @@ func TestGateway_ProcessRequest_HandlerTimeout(t *testing.T) {
 
 	gw, handler := newGatewayWithMockHandler(t)
 	handler.On("HandleUserMessage", mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	timeoutCtx, cancel := context.WithTimeout(testutils.Context(t), time.Duration(time.Millisecond*10))
+	timeoutCtx, cancel := context.WithTimeout(testutils.Context(t), time.Millisecond*10)
 	defer cancel()
 
-	response, statusCode := gw.ProcessRequest(timeoutCtx, []byte(`{"jsonrpc":"2.0", "method": "request", "id": "abcd", "params": {"body":{"don_id": "testDON"}}}`))
+	req := newSignedRequest(t, "abcd", "request", "testDON", []byte{})
+	response, statusCode := gw.ProcessRequest(timeoutCtx, req)
 	requireJsonRPCError(t, response, "abcd", -32000, "handler timeout")
 	require.Equal(t, 504, statusCode)
 }
@@ -180,7 +240,8 @@ func TestGateway_ProcessRequest_HandlerError(t *testing.T) {
 	gw, handler := newGatewayWithMockHandler(t)
 	handler.On("HandleUserMessage", mock.Anything, mock.Anything, mock.Anything).Return(errors.New("failure"))
 
-	response, statusCode := gw.ProcessRequest(testutils.Context(t), []byte(`{"jsonrpc":"2.0", "method": "request", "id": "abcd", "params": {"body":{"don_id": "testDON"}}}`))
-	requireJsonRPCError(t, response, "abcd", -32000, "failure")
-	require.Equal(t, 500, statusCode)
+	req := newSignedRequest(t, "abcd", "request", "testDON", []byte{})
+	response, statusCode := gw.ProcessRequest(testutils.Context(t), req)
+	requireJsonRPCError(t, response, "abcd", -32600, "failure")
+	require.Equal(t, 400, statusCode)
 }

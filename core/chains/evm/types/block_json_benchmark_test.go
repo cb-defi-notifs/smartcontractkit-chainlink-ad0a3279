@@ -9,7 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 )
 
@@ -73,7 +73,6 @@ func unmarshal_block(b *testing.B, block *evmtypes.Block) {
 
 func BenchmarkBlock_Small_JSONUnmarshal(b *testing.B) {
 	unmarshal_block(b, smallBlock)
-
 }
 
 func BenchmarkBlock_Medium_JSONUnmarshal(b *testing.B) {

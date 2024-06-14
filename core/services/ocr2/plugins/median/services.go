@@ -3,15 +3,17 @@ package median
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	libocr_median "github.com/smartcontractkit/libocr/offchainreporting2/reportingplugin/median"
 	libocr "github.com/smartcontractkit/libocr/offchainreporting2plus"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/loop"
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
-
-	v2 "github.com/smartcontractkit/chainlink/v2/core/config/v2"
+	"github.com/smartcontractkit/chainlink-common/pkg/loop"
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
+	"github.com/smartcontractkit/chainlink-feeds/median"
+	"github.com/smartcontractkit/chainlink/v2/core/config/env"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
@@ -23,19 +25,22 @@ import (
 
 type MedianConfig interface {
 	JobPipelineMaxSuccessfulRuns() uint64
+	JobPipelineResultWriteQueueDepth() uint64
 	plugins.RegistrarConfig
 }
 
 // concrete implementation of MedianConfig
 type medianConfig struct {
-	jobPipelineMaxSuccessfulRuns uint64
+	jobPipelineMaxSuccessfulRuns     uint64
+	jobPipelineResultWriteQueueDepth uint64
 	plugins.RegistrarConfig
 }
 
-func NewMedianConfig(jobPipelineMaxSuccessfulRuns uint64, pluginProcessCfg plugins.RegistrarConfig) MedianConfig {
+func NewMedianConfig(jobPipelineMaxSuccessfulRuns uint64, jobPipelineResultWriteQueueDepth uint64, pluginProcessCfg plugins.RegistrarConfig) MedianConfig {
 	return &medianConfig{
-		jobPipelineMaxSuccessfulRuns: jobPipelineMaxSuccessfulRuns,
-		RegistrarConfig:              pluginProcessCfg,
+		jobPipelineMaxSuccessfulRuns:     jobPipelineMaxSuccessfulRuns,
+		jobPipelineResultWriteQueueDepth: jobPipelineResultWriteQueueDepth,
+		RegistrarConfig:                  pluginProcessCfg,
 	}
 }
 
@@ -43,12 +48,16 @@ func (m *medianConfig) JobPipelineMaxSuccessfulRuns() uint64 {
 	return m.jobPipelineMaxSuccessfulRuns
 }
 
+func (m *medianConfig) JobPipelineResultWriteQueueDepth() uint64 {
+	return m.jobPipelineResultWriteQueueDepth
+}
+
 func NewMedianServices(ctx context.Context,
 	jb job.Job,
 	isNewlyCreatedJob bool,
 	relayer loop.Relayer,
+	kvStore job.KVStore,
 	pipelineRunner pipeline.Runner,
-	runResults chan pipeline.Run,
 	lggr logger.Logger,
 	argsNoPlugin libocr.OCR2OracleArgs,
 	cfg MedianConfig,
@@ -61,18 +70,26 @@ func NewMedianServices(ctx context.Context,
 	if err != nil {
 		return
 	}
-	err = config.ValidatePluginConfig(pluginConfig)
+	err = pluginConfig.ValidatePluginConfig()
 	if err != nil {
 		return
 	}
 	spec := jb.OCR2OracleSpec
 
-	provider, err := relayer.NewMedianProvider(ctx, types.RelayArgs{
+	runSaver := ocrcommon.NewResultRunSaver(
+		pipelineRunner,
+		lggr,
+		cfg.JobPipelineMaxSuccessfulRuns(),
+		cfg.JobPipelineResultWriteQueueDepth(),
+	)
+
+	provider, err := relayer.NewPluginProvider(ctx, types.RelayArgs{
 		ExternalJobID: jb.ExternalJobID,
-		JobID:         spec.ID,
+		JobID:         jb.ID,
 		ContractID:    spec.ContractID,
 		New:           isNewlyCreatedJob,
 		RelayConfig:   spec.RelayConfig.Bytes(),
+		ProviderType:  string(spec.PluginType),
 	}, types.PluginArgs{
 		TransmitterID: spec.TransmitterID.String,
 		PluginConfig:  spec.PluginConfig.Bytes(),
@@ -80,6 +97,12 @@ func NewMedianServices(ctx context.Context,
 	if err != nil {
 		return
 	}
+
+	medianProvider, ok := provider.(types.MedianProvider)
+	if !ok {
+		return nil, errors.New("could not coerce PluginProvider to MedianProvider")
+	}
+
 	srvs = append(srvs, provider)
 	argsNoPlugin.ContractTransmitter = provider.ContractTransmitter()
 	argsNoPlugin.ContractConfigTracker = provider.ContractConfigTracker()
@@ -91,32 +114,64 @@ func NewMedianServices(ctx context.Context,
 		}
 	}
 
-	dataSource, juelsPerFeeCoinSource := ocrcommon.NewDataSourceV2(pipelineRunner,
+	dataSource := ocrcommon.NewDataSourceV2(pipelineRunner,
 		jb,
 		*jb.PipelineSpec,
 		lggr,
-		runResults,
-		chEnhancedTelem,
-	), ocrcommon.NewInMemoryDataSource(pipelineRunner, jb, pipeline.Spec{
+		runSaver,
+		chEnhancedTelem)
+
+	juelsPerFeeCoinSource := ocrcommon.NewInMemoryDataSource(pipelineRunner, jb, pipeline.Spec{
 		ID:           jb.ID,
 		DotDagSource: pluginConfig.JuelsPerFeeCoinPipeline,
 		CreatedAt:    time.Now(),
 	}, lggr)
 
-	if cmdName := v2.EnvMedianPluginCmd.Get(); cmdName != "" {
-		medianLggr := lggr.Named("Median")
-		// use logger name to ensure unique naming
-		cmdFn, telem, err2 := cfg.RegisterLOOP(medianLggr.Name(), cmdName)
+	if pluginConfig.JuelsPerFeeCoinCache == nil || (pluginConfig.JuelsPerFeeCoinCache != nil && !pluginConfig.JuelsPerFeeCoinCache.Disable) {
+		lggr.Infof("juelsPerFeeCoin data source caching is enabled")
+		juelsPerFeeCoinSourceCache, err2 := ocrcommon.NewInMemoryDataSourceCache(juelsPerFeeCoinSource, kvStore, pluginConfig.JuelsPerFeeCoinCache)
+		if err2 != nil {
+			return nil, err2
+		}
+		juelsPerFeeCoinSource = juelsPerFeeCoinSourceCache
+		srvs = append(srvs, juelsPerFeeCoinSourceCache)
+	}
+
+	var gasPriceSubunitsDataSource libocr_median.DataSource
+	if pluginConfig.HasGasPriceSubunitsPipeline() {
+		gasPriceSubunitsDataSource = ocrcommon.NewInMemoryDataSource(pipelineRunner, jb, pipeline.Spec{
+			ID:           jb.ID,
+			DotDagSource: pluginConfig.GasPriceSubunitsPipeline,
+			CreatedAt:    time.Now(),
+		}, lggr)
+	} else {
+		gasPriceSubunitsDataSource = &median.ZeroDataSource{}
+	}
+
+	if cmdName := env.MedianPlugin.Cmd.Get(); cmdName != "" {
+		// use unique logger names so we can use it to register a loop
+		medianLggr := lggr.Named("Median").Named(spec.ContractID).Named(spec.GetID())
+		envVars, err2 := plugins.ParseEnvFile(env.MedianPlugin.Env.Get())
+		if err2 != nil {
+			err = fmt.Errorf("failed to parse median env file: %w", err2)
+			abort()
+			return
+		}
+		cmdFn, telem, err2 := cfg.RegisterLOOP(plugins.CmdConfig{
+			ID:  medianLggr.Name(),
+			Cmd: cmdName,
+			Env: envVars,
+		})
 		if err2 != nil {
 			err = fmt.Errorf("failed to register loop: %w", err2)
 			abort()
 			return
 		}
-		median := loop.NewMedianService(lggr, telem, cmdFn, provider, dataSource, juelsPerFeeCoinSource, errorLog)
+		median := loop.NewMedianService(lggr, telem, cmdFn, medianProvider, dataSource, juelsPerFeeCoinSource, gasPriceSubunitsDataSource, errorLog)
 		argsNoPlugin.ReportingPluginFactory = median
 		srvs = append(srvs, median)
 	} else {
-		argsNoPlugin.ReportingPluginFactory, err = NewPlugin(lggr).NewMedianFactory(ctx, provider, dataSource, juelsPerFeeCoinSource, errorLog)
+		argsNoPlugin.ReportingPluginFactory, err = median.NewPlugin(lggr).NewMedianFactory(ctx, medianProvider, dataSource, juelsPerFeeCoinSource, gasPriceSubunitsDataSource, errorLog)
 		if err != nil {
 			err = fmt.Errorf("failed to create median factory: %w", err)
 			abort()
@@ -124,19 +179,12 @@ func NewMedianServices(ctx context.Context,
 		}
 	}
 
-	var oracle *libocr.Oracle
+	var oracle libocr.Oracle
 	oracle, err = libocr.NewOracle(argsNoPlugin)
 	if err != nil {
 		abort()
 		return
 	}
-	runSaver := ocrcommon.NewResultRunSaver(
-		runResults,
-		pipelineRunner,
-		make(chan struct{}),
-		lggr,
-		cfg.JobPipelineMaxSuccessfulRuns(),
-	)
 	srvs = append(srvs, runSaver, job.NewServiceAdapter(oracle))
 	if !jb.OCR2OracleSpec.CaptureEATelemetry {
 		lggr.Infof("Enhanced EA telemetry is disabled for job %s", jb.Name.ValueOrZero())

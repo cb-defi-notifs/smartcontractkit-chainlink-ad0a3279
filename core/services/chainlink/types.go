@@ -1,10 +1,11 @@
 package chainlink
 
 import (
-	"github.com/smartcontractkit/chainlink/v2/core/chains/cosmos"
-	v2 "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/v2"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/solana"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/starknet"
+	coscfg "github.com/smartcontractkit/chainlink-cosmos/pkg/cosmos/config"
+	solcfg "github.com/smartcontractkit/chainlink-solana/pkg/solana/config"
+	stkcfg "github.com/smartcontractkit/chainlink-starknet/relayer/pkg/chainlink/config"
+
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
 )
 
@@ -12,10 +13,10 @@ import (
 
 type GeneralConfig interface {
 	config.AppConfig
-	v2.HasEVMConfigs
-	CosmosConfigs() cosmos.CosmosConfigs
-	SolanaConfigs() solana.SolanaConfigs
-	StarknetConfigs() starknet.StarknetConfigs
+	toml.HasEVMConfigs
+	CosmosConfigs() coscfg.TOMLConfigs
+	SolanaConfigs() solcfg.TOMLConfigs
+	StarknetConfigs() stkcfg.TOMLConfigs
 	// ConfigTOML returns both the user provided and effective configuration as TOML.
 	ConfigTOML() (user, effective string)
 }

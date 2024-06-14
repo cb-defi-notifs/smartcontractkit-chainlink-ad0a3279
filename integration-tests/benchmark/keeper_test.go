@@ -3,29 +3,29 @@ package benchmark
 import (
 	"fmt"
 	"math/big"
-	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	env_client "github.com/smartcontractkit/chainlink-env/client"
-	"github.com/smartcontractkit/chainlink-env/environment"
-	"github.com/smartcontractkit/chainlink-env/pkg/cdk8s/blockscout"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/reorg"
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils"
+	ctf_config "github.com/smartcontractkit/chainlink-testing-framework/config"
+	env_client "github.com/smartcontractkit/chainlink-testing-framework/k8s/client"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/environment"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/chainlink"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/ethereum"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/pkg/helm/reorg"
+	"github.com/smartcontractkit/chainlink-testing-framework/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/networks"
+	seth_utils "github.com/smartcontractkit/chainlink-testing-framework/utils/seth"
 
-	"github.com/smartcontractkit/chainlink/integration-tests/actions"
-	"github.com/smartcontractkit/chainlink/integration-tests/client"
+	actions_seth "github.com/smartcontractkit/chainlink/integration-tests/actions/seth"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 	eth_contracts "github.com/smartcontractkit/chainlink/integration-tests/contracts/ethereum"
-	"github.com/smartcontractkit/chainlink/integration-tests/networks"
+	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
 	"github.com/smartcontractkit/chainlink/integration-tests/testsetups"
+	"github.com/smartcontractkit/chainlink/integration-tests/types"
 )
 
 var (
@@ -38,15 +38,14 @@ Enabled = true
 [P2P]
 [P2P.V2]
 Enabled = true
-AnnounceAddresses = ["0.0.0.0:8090"]
-ListenAddresses = ["0.0.0.0:8090"]
+AnnounceAddresses = ["0.0.0.0:6690"]
+ListenAddresses = ["0.0.0.0:6690"]
 [Keeper]
-TurnLookBack = 0`
+TurnLookBack = 0
+[WebServer]
+HTTPWriteTimeout = '1h'`
 
 	simulatedEVMNonDevTOML = `
-[[EVM]]
-ChainID = 1337
-MinContractPayment = '0'
 Enabled = true
 FinalityDepth = 50
 LogPollInterval = '1s'
@@ -82,7 +81,7 @@ LimitDefault = 5_000_000`
 			},
 		},
 		"stateful": true,
-		"capacity": "1Gi",
+		"capacity": "10Gi",
 	}
 
 	soakChainlinkResources = map[string]interface{}{
@@ -109,29 +108,8 @@ LimitDefault = 5_000_000`
 			},
 		},
 		"stateful": true,
-		"capacity": "1Gi",
+		"capacity": "10Gi",
 	}
-)
-
-var (
-	NumberOfNodes, _        = strconv.Atoi(getEnv("NUMBEROFNODES", "6"))
-	RegistryToTest          = getEnv("REGISTRY", "2_0")
-	NumberOfUpkeeps, _      = strconv.Atoi(getEnv("NUMBEROFUPKEEPS", "500"))
-	CheckGasToBurn, _       = strconv.ParseInt(getEnv("CHECKGASTOBURN", "100000"), 0, 64)
-	PerformGasToBurn, _     = strconv.ParseInt(getEnv("PERFORMGASTOBURN", "50000"), 0, 64)
-	BlockRange, _           = strconv.ParseInt(getEnv("BLOCKRANGE", "3600"), 0, 64)
-	BlockInterval, _        = strconv.ParseInt(getEnv("BLOCKINTERVAL", "20"), 0, 64)
-	ChainlinkNodeFunding, _ = strconv.ParseFloat(getEnv("CHAINLINKNODEFUNDING", "0.5"), 64)
-	MaxPerformGas, _        = strconv.ParseInt(getEnv("MAXPERFORMGAS", "5000000"), 0, 32)
-	UpkeepGasLimit, _       = strconv.ParseInt(getEnv("UPKEEPGASLIMIT", fmt.Sprint(PerformGasToBurn+100000)), 0, 64)
-	NumberOfRegistries, _   = strconv.Atoi(getEnv("NUMBEROFREGISTRIES", "1"))
-	ForceSingleTxnKey, _    = strconv.ParseBool(getEnv("FORCESINGLETXNKEY", "false"))
-	DeleteJobsOnEnd, _      = strconv.ParseBool(getEnv("DELETEJOBSONEND", "true"))
-	RegistryAddress         = getEnv("REGISTRYADDRESS", "")
-	RegistrarAddress        = getEnv("REGISTRARADDRESS", "")
-	LinkTokenAddress        = getEnv("LINKTOKENADDRESS", "")
-	EthFeedAddress          = getEnv("ETHFEEDADDRESS", "")
-	GasFeedAddress          = getEnv("GASFEEDADDRESS", "")
 )
 
 type NetworkConfig struct {
@@ -141,74 +119,90 @@ type NetworkConfig struct {
 	funding    *big.Float
 }
 
+var defaultNetworkConfig = NetworkConfig{
+	upkeepSLA:  int64(120),
+	blockTime:  time.Second,
+	deltaStage: time.Duration(0),
+}
+
 func TestAutomationBenchmark(t *testing.T) {
-	l := utils.GetTestLogger(t)
-	testEnvironment, benchmarkNetwork := SetupAutomationBenchmarkEnv(t)
+	l := logging.GetTestLogger(t)
+	testType, err := tc.GetConfigurationNameFromEnv()
+	require.NoError(t, err, "Error getting test type")
+
+	config, err := tc.GetConfig(testType, tc.Keeper)
+	require.NoError(t, err, "Error getting test config")
+
+	testEnvironment, benchmarkNetwork := SetupAutomationBenchmarkEnv(t, &config)
 	if testEnvironment.WillUseRemoteRunner() {
 		return
 	}
 	networkName := strings.ReplaceAll(benchmarkNetwork.Name, " ", "")
-	testName := fmt.Sprintf("%s%s", networkName, RegistryToTest)
-	l.Info().Str("Test Name", testName).Str("Test Inputs", os.Getenv("TEST_INPUTS")).Msg("Running Benchmark Test")
-	benchmarkTestNetwork := networkConfig[networkName]
+	testName := fmt.Sprintf("%s%s", networkName, *config.Keeper.Common.RegistryToTest)
+	l.Info().Str("Test Name", testName).Msg("Running Benchmark Test")
+	benchmarkTestNetwork := getNetworkConfig(&config)
 
 	l.Info().Str("Namespace", testEnvironment.Cfg.Namespace).Msg("Connected to Keepers Benchmark Environment")
+	testNetwork := seth_utils.MustReplaceSimulatedNetworkUrlWithK8(l, benchmarkNetwork, *testEnvironment)
 
-	chainClient, err := blockchain.NewEVMClient(benchmarkNetwork, testEnvironment)
-	require.NoError(t, err, "Error connecting to blockchain")
-	registryVersions := addRegistry(RegistryToTest)
-	keeperBenchmarkTest := testsetups.NewKeeperBenchmarkTest(
+	chainClient, err := actions_seth.GetChainClientWithConfigFunction(&config, testNetwork, actions_seth.OneEphemeralKeysLiveTestnetAutoFixFn)
+	require.NoError(t, err, "Error getting Seth client")
+
+	registryVersions := addRegistry(&config)
+	keeperBenchmarkTest := testsetups.NewKeeperBenchmarkTest(t,
 		testsetups.KeeperBenchmarkTestInputs{
 			BlockchainClient: chainClient,
 			RegistryVersions: registryVersions,
 			KeeperRegistrySettings: &contracts.KeeperRegistrySettings{
 				PaymentPremiumPPB:    uint32(0),
+				FlatFeeMicroLINK:     uint32(40000),
 				BlockCountPerTurn:    big.NewInt(100),
-				CheckGasLimit:        uint32(45000000), //45M
-				StalenessSeconds:     big.NewInt(90000),
+				CheckGasLimit:        uint32(45_000_000), //45M
+				StalenessSeconds:     big.NewInt(90_000),
 				GasCeilingMultiplier: uint16(2),
-				MaxPerformGas:        uint32(MaxPerformGas),
+				MaxPerformGas:        uint32(*config.Keeper.Common.MaxPerformGas),
 				MinUpkeepSpend:       big.NewInt(0),
 				FallbackGasPrice:     big.NewInt(2e11),
 				FallbackLinkPrice:    big.NewInt(2e18),
-				MaxCheckDataSize:     uint32(5000),
-				MaxPerformDataSize:   uint32(5000),
+				MaxCheckDataSize:     uint32(5_000),
+				MaxPerformDataSize:   uint32(5_000),
+				MaxRevertDataSize:    uint32(5_000),
 			},
 			Upkeeps: &testsetups.UpkeepConfig{
-				NumberOfUpkeeps:     NumberOfUpkeeps,
-				CheckGasToBurn:      CheckGasToBurn,
-				PerformGasToBurn:    PerformGasToBurn,
-				BlockRange:          BlockRange,
-				BlockInterval:       BlockInterval,
-				UpkeepGasLimit:      UpkeepGasLimit,
+				NumberOfUpkeeps:     *config.Keeper.Common.NumberOfUpkeeps,
+				CheckGasToBurn:      *config.Keeper.Common.CheckGasToBurn,
+				PerformGasToBurn:    *config.Keeper.Common.PerformGasToBurn,
+				BlockRange:          *config.Keeper.Common.BlockRange,
+				BlockInterval:       *config.Keeper.Common.BlockInterval,
+				UpkeepGasLimit:      *config.Keeper.Common.UpkeepGasLimit,
 				FirstEligibleBuffer: 1,
 			},
 			Contracts: &testsetups.PreDeployedContracts{
-				RegistrarAddress: RegistrarAddress,
-				RegistryAddress:  RegistryAddress,
-				LinkTokenAddress: LinkTokenAddress,
-				EthFeedAddress:   EthFeedAddress,
-				GasFeedAddress:   GasFeedAddress,
+				RegistrarAddress: *config.Keeper.Common.RegistrarAddress,
+				RegistryAddress:  *config.Keeper.Common.RegistryAddress,
+				LinkTokenAddress: *config.Keeper.Common.LinkTokenAddress,
+				EthFeedAddress:   *config.Keeper.Common.EthFeedAddress,
+				GasFeedAddress:   *config.Keeper.Common.GasFeedAddress,
 			},
 			ChainlinkNodeFunding: benchmarkTestNetwork.funding,
 			UpkeepSLA:            benchmarkTestNetwork.upkeepSLA,
 			BlockTime:            benchmarkTestNetwork.blockTime,
 			DeltaStage:           benchmarkTestNetwork.deltaStage,
-			ForceSingleTxnKey:    ForceSingleTxnKey,
-			DeleteJobsOnEnd:      DeleteJobsOnEnd,
+			ForceSingleTxnKey:    *config.Keeper.Common.ForceSingleTxKey,
+			DeleteJobsOnEnd:      *config.Keeper.Common.DeleteJobsOnEnd,
 		},
 	)
 	t.Cleanup(func() {
-		if err = actions.TeardownRemoteSuite(keeperBenchmarkTest.TearDownVals(t)); err != nil {
+		if err = actions_seth.TeardownRemoteSuite(keeperBenchmarkTest.TearDownVals(t)); err != nil {
 			l.Error().Err(err).Msg("Error when tearing down remote suite")
 		}
 	})
-	keeperBenchmarkTest.Setup(t, testEnvironment)
-	keeperBenchmarkTest.Run(t)
+	keeperBenchmarkTest.Setup(testEnvironment, &config)
+	keeperBenchmarkTest.Run()
 }
 
-func addRegistry(registryToTest string) []eth_contracts.KeeperRegistryVersion {
-	switch registryToTest {
+func addRegistry(config *tc.TestConfig) []eth_contracts.KeeperRegistryVersion {
+	switch *config.Keeper.Common.RegistryToTest {
 	case "1_1":
 		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_1_1}
 	case "1_2":
@@ -217,10 +211,23 @@ func addRegistry(registryToTest string) []eth_contracts.KeeperRegistryVersion {
 		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_1_3}
 	case "2_0":
 		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_2_0}
+	case "2_1":
+		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_2_1}
+	case "2_2":
+		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_2_2}
 	case "2_0-1_3":
 		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_2_0, eth_contracts.RegistryVersion_1_3}
+	case "2_1-2_0-1_3":
+		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_2_1,
+			eth_contracts.RegistryVersion_2_0, eth_contracts.RegistryVersion_1_3}
+	case "2_2-2_1":
+		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_2_2, eth_contracts.RegistryVersion_2_1}
 	case "2_0-Multiple":
-		return repeatRegistries(eth_contracts.RegistryVersion_2_0, NumberOfRegistries)
+		return repeatRegistries(eth_contracts.RegistryVersion_2_0, *config.Keeper.Common.NumberOfRegistries)
+	case "2_1-Multiple":
+		return repeatRegistries(eth_contracts.RegistryVersion_2_1, *config.Keeper.Common.NumberOfRegistries)
+	case "2_2-Multiple":
+		return repeatRegistries(eth_contracts.RegistryVersion_2_2, *config.Keeper.Common.NumberOfRegistries)
 	default:
 		return []eth_contracts.KeeperRegistryVersion{eth_contracts.RegistryVersion_2_0}
 	}
@@ -234,111 +241,128 @@ func repeatRegistries(registryVersion eth_contracts.KeeperRegistryVersion, numbe
 	return repeatedRegistries
 }
 
-var networkConfig = map[string]NetworkConfig{
-	"SimulatedGeth": {
-		upkeepSLA:  int64(20),
-		blockTime:  time.Second,
-		deltaStage: time.Duration(0),
-		funding:    big.NewFloat(100_000),
-	},
-	"simulated": {
-		upkeepSLA:  int64(20),
-		blockTime:  time.Second,
-		deltaStage: time.Duration(0),
-		funding:    big.NewFloat(100_000),
-	},
-	"GoerliTestnet": {
-		upkeepSLA:  int64(4),
-		blockTime:  12 * time.Second,
-		deltaStage: time.Duration(0),
-		funding:    big.NewFloat(ChainlinkNodeFunding),
-	},
-	"ArbitrumGoerli": {
-		upkeepSLA:  int64(20),
-		blockTime:  time.Second,
-		deltaStage: time.Duration(0),
-		funding:    big.NewFloat(ChainlinkNodeFunding),
-	},
-	"OptimismGoerli": {
-		upkeepSLA:  int64(20),
-		blockTime:  time.Second,
-		deltaStage: time.Duration(0),
-		funding:    big.NewFloat(ChainlinkNodeFunding),
-	},
-	"SepoliaTestnet": {
-		upkeepSLA:  int64(4),
-		blockTime:  12 * time.Second,
-		deltaStage: time.Duration(0),
-		funding:    big.NewFloat(ChainlinkNodeFunding),
-	},
-	"PolygonMumbai": {
-		upkeepSLA:  int64(4),
-		blockTime:  12 * time.Second,
-		deltaStage: time.Duration(0),
-		funding:    big.NewFloat(ChainlinkNodeFunding),
-	},
-}
-
-func getEnv(key, fallback string) string {
-	if inputs, ok := os.LookupEnv("TEST_INPUTS"); ok {
-		values := strings.Split(inputs, ",")
-		for _, value := range values {
-			if strings.Contains(value, key) {
-				return strings.Split(value, "=")[1]
-			}
-		}
+func getNetworkConfig(config *tc.TestConfig) NetworkConfig {
+	evmNetwork := networks.MustGetSelectedNetworkConfig(config.GetNetworkConfig())[0]
+	var nc NetworkConfig
+	var ok bool
+	if nc, ok = networkConfig[evmNetwork.Name]; !ok {
+		nc = defaultNetworkConfig
 	}
-	return fallback
+
+	if evmNetwork.Name == networks.SimulatedEVM.Name || evmNetwork.Name == networks.SimulatedEVMNonDev.Name {
+		return nc
+	}
+
+	nc.funding = big.NewFloat(*config.Common.ChainlinkNodeFunding)
+
+	return nc
 }
 
-func SetupAutomationBenchmarkEnv(t *testing.T) (*environment.Environment, blockchain.EVMNetwork) {
-	l := utils.GetTestLogger(t)
-	testNetwork := networks.SelectedNetwork // Environment currently being used to run benchmark test on
+var networkConfig = map[string]NetworkConfig{
+	networks.SimulatedEVM.Name: {
+		upkeepSLA:  int64(120), //2 minutes
+		blockTime:  time.Second,
+		deltaStage: 30 * time.Second,
+		funding:    big.NewFloat(100_000),
+	},
+	networks.SimulatedEVMNonDev.Name: {
+		upkeepSLA:  int64(120), //2 minutes
+		blockTime:  time.Second,
+		deltaStage: 30 * time.Second,
+		funding:    big.NewFloat(100_000),
+	},
+	networks.GoerliTestnet.Name: {
+		upkeepSLA:  int64(4),
+		blockTime:  12 * time.Second,
+		deltaStage: time.Duration(0),
+	},
+	networks.SepoliaTestnet.Name: {
+		upkeepSLA:  int64(4),
+		blockTime:  12 * time.Second,
+		deltaStage: time.Duration(0),
+	},
+	networks.PolygonMumbai.Name: {
+		upkeepSLA:  int64(4),
+		blockTime:  12 * time.Second,
+		deltaStage: time.Duration(0),
+	},
+	networks.BaseSepolia.Name: {
+		upkeepSLA:  int64(60),
+		blockTime:  2 * time.Second,
+		deltaStage: 20 * time.Second,
+	},
+	networks.ArbitrumSepolia.Name: {
+		upkeepSLA:  int64(120),
+		blockTime:  time.Second,
+		deltaStage: 20 * time.Second,
+	},
+	networks.OptimismSepolia.Name: {
+		upkeepSLA:  int64(120),
+		blockTime:  time.Second,
+		deltaStage: 20 * time.Second,
+	},
+	networks.LineaGoerli.Name: {
+		upkeepSLA:  int64(120),
+		blockTime:  time.Second,
+		deltaStage: 20 * time.Second,
+	},
+	networks.GnosisChiado.Name: {
+		upkeepSLA:  int64(120),
+		blockTime:  6 * time.Second,
+		deltaStage: 20 * time.Second,
+	},
+	networks.PolygonZkEvmCardona.Name: {
+		upkeepSLA:  int64(120),
+		blockTime:  time.Second,
+		deltaStage: 20 * time.Second,
+	},
+}
+
+func SetupAutomationBenchmarkEnv(t *testing.T, keeperTestConfig types.KeeperBenchmarkTestConfig) (*environment.Environment, blockchain.EVMNetwork) {
+	l := logging.GetTestLogger(t)
+	testNetwork := networks.MustGetSelectedNetworkConfig(keeperTestConfig.GetNetworkConfig())[0] // Environment currently being used to run benchmark test on
 	blockTime := "1"
 	networkDetailTOML := `MinIncomingConfirmations = 1`
 
-	if strings.Contains(RegistryToTest, "2_0") {
-		NumberOfNodes++
+	numberOfNodes := *keeperTestConfig.GetKeeperConfig().Common.NumberOfNodes
+
+	if strings.Contains(*keeperTestConfig.GetKeeperConfig().Common.RegistryToTest, "2_") {
+		numberOfNodes++
 	}
 
-	testType := strings.ToLower(getEnv("TEST_TYPE", "benchmark"))
+	networkName := strings.ReplaceAll(testNetwork.Name, " ", "-")
+	networkName = strings.ReplaceAll(networkName, "_", "-")
+	testNetwork.Name = networkName
+
 	testEnvironment := environment.New(&environment.Config{
 		TTL: time.Hour * 720, // 30 days,
 		NamespacePrefix: fmt.Sprintf(
 			"automation-%s-%s-%s",
-			testType,
+			strings.ToLower(keeperTestConfig.GetConfigurationName()),
 			strings.ReplaceAll(strings.ToLower(testNetwork.Name), " ", "-"),
-			strings.ReplaceAll(strings.ToLower(RegistryToTest), "_", "-"),
+			strings.ReplaceAll(strings.ToLower(*keeperTestConfig.GetKeeperConfig().Common.RegistryToTest), "_", "-"),
 		),
-		Test: t,
+		Test:               t,
+		PreventPodEviction: true,
 	})
-	// propagate TEST_INPUTS to remote runner
-	if testEnvironment.WillUseRemoteRunner() {
-		key := "TEST_INPUTS"
-		err := os.Setenv(fmt.Sprintf("TEST_%s", key), os.Getenv(key))
-		require.NoError(t, err, "failed to set the environment variable TEST_INPUTS for remote runner")
-		key = "GRAFANA_DASHBOARD_URL"
-		err = os.Setenv(fmt.Sprintf("TEST_%s", key), getEnv(key, ""))
-		require.NoError(t, err, "failed to set the environment variable GRAFANA_DASHBOARD_URL for remote runner")
-	}
 
 	dbResources := performanceDbResources
 	chainlinkResources := performanceChainlinkResources
-	if testType == "soak" {
+	if strings.ToLower(keeperTestConfig.GetConfigurationName()) == "soak" {
 		chainlinkResources = soakChainlinkResources
 		dbResources = soakDbResources
 	}
 
 	// Test can run on simulated, simulated-non-dev, testnets
 	if testNetwork.Name == networks.SimulatedEVMNonDev.Name {
-		keeperBenchmarkBaseTOML = keeperBenchmarkBaseTOML + simulatedEVMNonDevTOML
+		networkDetailTOML = simulatedEVMNonDevTOML
 		testEnvironment.
 			AddHelm(reorg.New(&reorg.Props{
 				NetworkName: testNetwork.Name,
 				Values: map[string]interface{}{
 					"geth": map[string]interface{}{
 						"tx": map[string]interface{}{
-							"replicas": NumberOfNodes,
+							"replicas": numberOfNodes,
 						},
 						"miner": map[string]interface{}{
 							"replicas": 2,
@@ -364,20 +388,24 @@ func SetupAutomationBenchmarkEnv(t *testing.T) (*environment.Environment, blockc
 						},
 					},
 					"geth": map[string]interface{}{
-						"blocktime": blockTime,
+						"blocktime":      blockTime,
+						"capacity":       "20Gi",
+						"startGaslimit":  "20000000",
+						"targetGasLimit": "30000000",
 					},
 				},
 			}))
 	}
 
+	// TODO we need to update the image in CTF, the old one is not available anymore
 	// deploy blockscout if running on simulated
-	if testNetwork.Simulated {
-		testEnvironment.
-			AddChart(blockscout.New(&blockscout.Props{
-				Name:    "geth-blockscout",
-				WsURL:   testNetwork.URLs[0],
-				HttpURL: testNetwork.HTTPURLs[0]}))
-	}
+	// if testNetwork.Simulated {
+	// 	testEnvironment.
+	// 		AddChart(blockscout.New(&blockscout.Props{
+	// 			Name:    "geth-blockscout",
+	// 			WsURL:   testNetwork.URLs[0],
+	// 			HttpURL: testNetwork.HTTPURLs[0]}))
+	// }
 	err := testEnvironment.Run()
 	require.NoError(t, err, "Error launching test environment")
 
@@ -388,7 +416,7 @@ func SetupAutomationBenchmarkEnv(t *testing.T) (*environment.Environment, blockc
 	// separate RPC urls per CL node
 	internalWsURLs := make([]string, 0)
 	internalHttpURLs := make([]string, 0)
-	for i := 0; i < NumberOfNodes; i++ {
+	for i := 0; i < numberOfNodes; i++ {
 		// for simulated-nod-dev each CL node gets its own RPC node
 		if testNetwork.Name == networks.SimulatedEVMNonDev.Name {
 			podName := fmt.Sprintf("%s-ethereum-geth:%d", testNetwork.Name, i)
@@ -410,14 +438,22 @@ func SetupAutomationBenchmarkEnv(t *testing.T) (*environment.Environment, blockc
 	}
 	l.Debug().Strs("internalWsURLs", internalWsURLs).Strs("internalHttpURLs", internalHttpURLs).Msg("internalURLs")
 
-	for i := 0; i < NumberOfNodes; i++ {
+	for i := 0; i < numberOfNodes; i++ {
 		testNetwork.HTTPURLs = []string{internalHttpURLs[i]}
 		testNetwork.URLs = []string{internalWsURLs[i]}
-		testEnvironment.AddHelm(chainlink.New(i, map[string]any{
-			"toml":      client.AddNetworkDetailedConfig(keeperBenchmarkBaseTOML, networkDetailTOML, testNetwork),
+
+		var overrideFn = func(_ interface{}, target interface{}) {
+			ctf_config.MustConfigOverrideChainlinkVersion(keeperTestConfig.GetChainlinkImageConfig(), target)
+			ctf_config.MightConfigOverridePyroscopeKey(keeperTestConfig.GetPyroscopeConfig(), target)
+		}
+
+		cd := chainlink.NewWithOverride(i, map[string]any{
+			"toml":      networks.AddNetworkDetailedConfig(keeperBenchmarkBaseTOML, keeperTestConfig.GetPyroscopeConfig(), networkDetailTOML, testNetwork),
 			"chainlink": chainlinkResources,
 			"db":        dbResources,
-		}))
+		}, keeperTestConfig.GetChainlinkImageConfig(), overrideFn)
+
+		testEnvironment.AddHelm(cd)
 	}
 	err = testEnvironment.Run()
 	require.NoError(t, err, "Error launching test environment")

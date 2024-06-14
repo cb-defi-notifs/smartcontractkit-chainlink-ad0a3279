@@ -10,22 +10,25 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/stretchr/testify/require"
 
-	ocr2vrftypes "github.com/smartcontractkit/ocr2vrf/types"
+	"github.com/smartcontractkit/seth"
+
+	ocr2vrftypes "github.com/smartcontractkit/chainlink-vrf/types"
 
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils"
+	"github.com/smartcontractkit/chainlink-testing-framework/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
 
+	actions_seth "github.com/smartcontractkit/chainlink/integration-tests/actions/seth"
+	chainlinkutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/chaintype"
-	chainlinkutils "github.com/smartcontractkit/chainlink/v2/core/utils"
 
-	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions/ocr2vrf_actions/ocr2vrf_constants"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 )
 
 func SetAndWaitForVRFBeaconProcessToFinish(t *testing.T, ocr2VRFPluginConfig *OCR2VRFPluginConfig, vrfBeacon contracts.VRFBeacon) {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	ocr2VrfConfig := BuildOCR2VRFConfigVars(t, ocr2VRFPluginConfig)
 	l.Debug().Interface("OCR2 VRF Config", ocr2VrfConfig).Msg("OCR2 VRF Config prepared")
 
@@ -45,7 +48,7 @@ func SetAndWaitForVRFBeaconProcessToFinish(t *testing.T, ocr2VRFPluginConfig *OC
 }
 
 func SetAndWaitForDKGProcessToFinish(t *testing.T, ocr2VRFPluginConfig *OCR2VRFPluginConfig, dkg contracts.DKG) {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	ocr2DkgConfig := BuildOCR2DKGConfigVars(t, ocr2VRFPluginConfig)
 
 	// set config for DKG OCR
@@ -72,7 +75,7 @@ func SetAndWaitForDKGProcessToFinish(t *testing.T, ocr2VRFPluginConfig *OCR2VRFP
 
 func SetAndGetOCR2VRFPluginConfig(
 	t *testing.T,
-	nonBootstrapNodes []*client.Chainlink,
+	nonBootstrapNodes []*client.ChainlinkK8sClient,
 	dkg contracts.DKG,
 	vrfBeacon contracts.VRFBeacon,
 	coordinator contracts.VRFCoordinatorV3,
@@ -163,52 +166,39 @@ func SetAndGetOCR2VRFPluginConfig(
 	return ocr2VRFPluginConfig
 }
 
-func FundVRFCoordinatorV3Subscription(t *testing.T, linkToken contracts.LinkToken, coordinator contracts.VRFCoordinatorV3, chainClient blockchain.EVMClient, subscriptionID, linkFundingAmount *big.Int) {
+func FundVRFCoordinatorV3Subscription(t *testing.T, linkToken contracts.LinkToken, coordinator contracts.VRFCoordinatorV3, subscriptionID, linkFundingAmount *big.Int) {
 	encodedSubId, err := chainlinkutils.ABIEncode(`[{"type":"uint256"}]`, subscriptionID)
 	require.NoError(t, err, "Error Abi encoding subscriptionID")
 	_, err = linkToken.TransferAndCall(coordinator.Address(), big.NewInt(0).Mul(linkFundingAmount, big.NewInt(1e18)), encodedSubId)
 	require.NoError(t, err, "Error sending Link token")
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 }
 
-func DeployOCR2VRFContracts(t *testing.T, contractDeployer contracts.ContractDeployer, chainClient blockchain.EVMClient, linkToken contracts.LinkToken, mockETHLinkFeed contracts.MockETHLINKFeed, beaconPeriodBlocksCount *big.Int, keyID string) (contracts.DKG, contracts.VRFCoordinatorV3, contracts.VRFBeacon, contracts.VRFBeaconConsumer) {
-	dkg, err := contractDeployer.DeployDKG()
+func DeployOCR2VRFContracts(t *testing.T, chainClient *seth.Client, linkToken contracts.LinkToken, beaconPeriodBlocksCount *big.Int, keyID string) (contracts.DKG, contracts.VRFCoordinatorV3, contracts.VRFBeacon, contracts.VRFBeaconConsumer) {
+	dkg, err := contracts.DeployDKG(chainClient)
 	require.NoError(t, err, "Error deploying DKG Contract")
 
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
-
-	coordinator, err := contractDeployer.DeployOCR2VRFCoordinator(beaconPeriodBlocksCount, linkToken.Address())
+	coordinator, err := contracts.DeployOCR2VRFCoordinator(chainClient, beaconPeriodBlocksCount, linkToken.Address())
 	require.NoError(t, err, "Error deploying OCR2VRFCoordinator Contract")
 
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
-
-	vrfBeacon, err := contractDeployer.DeployVRFBeacon(coordinator.Address(), linkToken.Address(), dkg.Address(), keyID)
+	vrfBeacon, err := contracts.DeployVRFBeacon(chainClient, coordinator.Address(), linkToken.Address(), dkg.Address(), keyID)
 	require.NoError(t, err, "Error deploying VRFBeacon Contract")
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 
-	consumer, err := contractDeployer.DeployVRFBeaconConsumer(coordinator.Address(), beaconPeriodBlocksCount)
+	consumer, err := contracts.DeployVRFBeaconConsumer(chainClient, coordinator.Address(), beaconPeriodBlocksCount)
 	require.NoError(t, err, "Error deploying VRFBeaconConsumer Contract")
 
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 	return dkg, coordinator, vrfBeacon, consumer
 }
 
 func RequestAndRedeemRandomness(
 	t *testing.T,
 	consumer contracts.VRFBeaconConsumer,
-	chainClient blockchain.EVMClient,
 	vrfBeacon contracts.VRFBeacon,
 	numberOfRandomWordsToRequest uint16,
 	subscriptionID,
 	confirmationDelay *big.Int,
 	randomnessTransmissionEventTimeout time.Duration,
 ) *big.Int {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	receipt, err := consumer.RequestRandomness(
 		numberOfRandomWordsToRequest,
 		subscriptionID,
@@ -216,9 +206,6 @@ func RequestAndRedeemRandomness(
 	)
 	require.NoError(t, err, "Error requesting randomness from Consumer Contract")
 	l.Info().Interface("TX Hash", receipt.TxHash).Msg("Randomness requested from Consumer contract")
-
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 
 	requestID := getRequestId(t, consumer, receipt, confirmationDelay)
 
@@ -228,8 +215,6 @@ func RequestAndRedeemRandomness(
 
 	err = consumer.RedeemRandomness(subscriptionID, requestID)
 	require.NoError(t, err, "Error redeeming randomness from Consumer Contract")
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 
 	return requestID
 }
@@ -237,14 +222,13 @@ func RequestAndRedeemRandomness(
 func RequestRandomnessFulfillmentAndWaitForFulfilment(
 	t *testing.T,
 	consumer contracts.VRFBeaconConsumer,
-	chainClient blockchain.EVMClient,
 	vrfBeacon contracts.VRFBeacon,
 	numberOfRandomWordsToRequest uint16,
 	subscriptionID *big.Int,
 	confirmationDelay *big.Int,
 	randomnessTransmissionEventTimeout time.Duration,
 ) *big.Int {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	receipt, err := consumer.RequestRandomnessFulfillment(
 		numberOfRandomWordsToRequest,
 		subscriptionID,
@@ -256,30 +240,24 @@ func RequestRandomnessFulfillmentAndWaitForFulfilment(
 	require.NoError(t, err, "Error requesting Randomness Fulfillment")
 	l.Info().Interface("TX Hash", receipt.TxHash).Msg("Randomness Fulfillment requested from Consumer contract")
 
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
-
 	requestID := getRequestId(t, consumer, receipt, confirmationDelay)
 
 	newTransmissionEvent, err := vrfBeacon.WaitForNewTransmissionEvent(randomnessTransmissionEventTimeout)
 	require.NoError(t, err, "Error waiting for NewTransmission event from VRF Beacon Contract")
 	l.Info().Interface("NewTransmission event", newTransmissionEvent).Msg("Randomness Fulfillment transmitted by DON")
 
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
-
 	return requestID
 }
 
 func getRequestId(t *testing.T, consumer contracts.VRFBeaconConsumer, receipt *types.Receipt, confirmationDelay *big.Int) *big.Int {
-	periodBlocks, err := consumer.IBeaconPeriodBlocks(nil)
+	periodBlocks, err := consumer.IBeaconPeriodBlocks(testcontext.Get(t))
 	require.NoError(t, err, "Error getting Beacon Period block count")
 
 	blockNumber := receipt.BlockNumber
 	periodOffset := new(big.Int).Mod(blockNumber, periodBlocks)
 	nextBeaconOutputHeight := new(big.Int).Sub(new(big.Int).Add(blockNumber, periodBlocks), periodOffset)
 
-	requestID, err := consumer.GetRequestIdsBy(nil, nextBeaconOutputHeight, confirmationDelay)
+	requestID, err := consumer.GetRequestIdsBy(testcontext.Get(t), nextBeaconOutputHeight, confirmationDelay)
 	require.NoError(t, err, "Error getting requestID from consumer contract")
 
 	return requestID
@@ -289,12 +267,12 @@ func SetupOCR2VRFUniverse(
 	t *testing.T,
 	linkToken contracts.LinkToken,
 	mockETHLinkFeed contracts.MockETHLINKFeed,
-	contractDeployer contracts.ContractDeployer,
-	chainClient blockchain.EVMClient,
+	chainClient *seth.Client,
 	nodeAddresses []common.Address,
-	chainlinkNodes []*client.Chainlink,
+	chainlinkNodes []*client.ChainlinkK8sClient,
 	testNetwork blockchain.EVMNetwork,
 ) (contracts.DKG, contracts.VRFCoordinatorV3, contracts.VRFBeacon, contracts.VRFBeaconConsumer, *big.Int) {
+	l := logging.GetTestLogger(t)
 
 	// Deploy DKG contract
 	// Deploy VRFCoordinator(beaconPeriodBlocks, linkAddress, linkEthfeedAddress)
@@ -302,10 +280,8 @@ func SetupOCR2VRFUniverse(
 	// Deploy Consumer Contract
 	dkgContract, coordinatorContract, vrfBeaconContract, consumerContract := DeployOCR2VRFContracts(
 		t,
-		contractDeployer,
 		chainClient,
 		linkToken,
-		mockETHLinkFeed,
 		ocr2vrf_constants.BeaconPeriodBlocksCount,
 		ocr2vrf_constants.KeyID,
 	)
@@ -318,30 +294,23 @@ func SetupOCR2VRFUniverse(
 	require.NoError(t, err, "Error setting Producer for VRFCoordinator contract")
 	err = coordinatorContract.SetConfig(2.5e6, 160 /* 5 EVM words */)
 	require.NoError(t, err, "Error setting config for VRFCoordinator contract")
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 
 	// Subscription:
 	//1.	Create Subscription
 	err = coordinatorContract.CreateSubscription()
 	require.NoError(t, err, "Error creating subscription in VRFCoordinator contract")
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 	subID, err := coordinatorContract.FindSubscriptionID()
 	require.NoError(t, err)
 
 	//2.	Add Consumer to subscription
 	err = coordinatorContract.AddConsumer(subID, consumerContract.Address())
 	require.NoError(t, err, "Error adding a consumer to a subscription in VRFCoordinator contract")
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 
 	//3.	fund subscription with LINK token
 	FundVRFCoordinatorV3Subscription(
 		t,
 		linkToken,
 		coordinatorContract,
-		chainClient,
 		subID,
 		ocr2vrf_constants.LinkFundingAmount,
 	)
@@ -352,10 +321,9 @@ func SetupOCR2VRFUniverse(
 	require.NoError(t, err, "Error setting Payees in VRFBeacon Contract")
 
 	// fund OCR Nodes (so that they can transmit)
-	err = actions.FundChainlinkNodes(chainlinkNodes, chainClient, ocr2vrf_constants.EthFundingAmount)
+	nodes := contracts.ChainlinkK8sClientToChainlinkNodeWithKeysAndAddress(chainlinkNodes)
+	err = actions_seth.FundChainlinkNodesFromRootAddress(l, chainClient, nodes, ocr2vrf_constants.EthFundingAmount)
 	require.NoError(t, err, "Error funding Nodes")
-	err = chainClient.WaitForEvents()
-	require.NoError(t, err, "Error waiting for TXs to complete")
 
 	bootstrapNode := chainlinkNodes[0]
 	nonBootstrapNodes := chainlinkNodes[1:]

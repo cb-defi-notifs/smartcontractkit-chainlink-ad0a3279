@@ -6,10 +6,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jonboulle/clockwork"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/multierr"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/services"
 
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/gateway/api"
@@ -18,8 +25,12 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/gateway/handlers"
 	"github.com/smartcontractkit/chainlink/v2/core/services/gateway/network"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
+
+var promKeepalivesSent = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "gateway_keepalives_sent",
+	Help: "Metric to track the number of successful keepalive ping messages per DON",
+}, []string{"don_id"})
 
 // ConnectionManager holds all connections between Gateway and Nodes.
 type ConnectionManager interface {
@@ -27,20 +38,33 @@ type ConnectionManager interface {
 	network.ConnectionAcceptor
 
 	DONConnectionManager(donId string) *donConnectionManager
+	GetPort() int
 }
 
 type connectionManager struct {
-	utils.StartStopOnce
+	services.StateMachine
 
 	config             *config.ConnectionManagerConfig
 	dons               map[string]*donConnectionManager
 	wsServer           network.WebSocketServer
-	clock              utils.Clock
+	clock              clockwork.Clock
 	connAttempts       map[string]*connAttempt
 	connAttemptCounter uint64
 	connAttemptsMu     sync.Mutex
 	lggr               logger.Logger
 }
+
+func (m *connectionManager) HealthReport() map[string]error {
+	hr := map[string]error{m.Name(): m.Healthy()}
+	for _, d := range m.dons {
+		for _, n := range d.nodes {
+			services.CopyHealth(hr, n.conn.HealthReport())
+		}
+	}
+	return hr
+}
+
+func (m *connectionManager) Name() string { return m.lggr.Name() }
 
 type donConnectionManager struct {
 	donConfig  *config.DONConfig
@@ -48,25 +72,24 @@ type donConnectionManager struct {
 	handler    handlers.Handler
 	codec      api.Codec
 	closeWait  sync.WaitGroup
-	shutdownCh chan struct{}
+	shutdownCh services.StopChan
 	lggr       logger.Logger
 }
 
 type nodeState struct {
-	conn           network.WSConnectionWrapper
-	lastAcceptedTs uint32
-	mu             sync.RWMutex
+	name string
+	conn network.WSConnectionWrapper
 }
 
 // immutable
 type connAttempt struct {
 	nodeState   *nodeState
 	nodeAddress string
-	challenge   []byte
+	challenge   network.ChallengeElems
 	timestamp   uint32
 }
 
-func NewConnectionManager(gwConfig *config.GatewayConfig, clock utils.Clock, lggr logger.Logger) (ConnectionManager, error) {
+func NewConnectionManager(gwConfig *config.GatewayConfig, clock clockwork.Clock, lggr logger.Logger) (ConnectionManager, error) {
 	codec := &api.JsonRPCCodec{}
 	dons := make(map[string]*donConnectionManager)
 	for _, donConfig := range gwConfig.Dons {
@@ -80,18 +103,26 @@ func NewConnectionManager(gwConfig *config.GatewayConfig, clock utils.Clock, lgg
 		}
 		nodes := make(map[string]*nodeState)
 		for _, nodeConfig := range donConfig.Members {
-			_, ok := nodes[nodeConfig.Address]
+			nodeAddress := strings.ToLower(nodeConfig.Address)
+			_, ok := nodes[nodeAddress]
 			if ok {
-				return nil, fmt.Errorf("duplicate node address %s in DON %s", nodeConfig.Address, donConfig.DonId)
+				return nil, fmt.Errorf("duplicate node address %s in DON %s", nodeAddress, donConfig.DonId)
 			}
-			nodes[nodeConfig.Address] = &nodeState{}
+			connWrapper := network.NewWSConnectionWrapper(lggr)
+			if connWrapper == nil {
+				return nil, fmt.Errorf("error creating WSConnectionWrapper for node %s", nodeAddress)
+			}
+			nodes[nodeAddress] = &nodeState{
+				name: nodeConfig.Name,
+				conn: connWrapper,
+			}
 		}
 		dons[donConfig.DonId] = &donConnectionManager{
 			donConfig:  &donConfig,
 			codec:      codec,
 			nodes:      nodes,
 			shutdownCh: make(chan struct{}),
-			lggr:       lggr,
+			lggr:       lggr.Named("DONConnectionManager." + donConfig.DonId),
 		}
 	}
 	connMgr := &connectionManager{
@@ -114,11 +145,15 @@ func (m *connectionManager) Start(ctx context.Context) error {
 	return m.StartOnce("ConnectionManager", func() error {
 		m.lggr.Info("starting connection manager")
 		for _, donConnMgr := range m.dons {
+			donConnMgr.closeWait.Add(len(donConnMgr.nodes))
 			for nodeAddress, nodeState := range donConnMgr.nodes {
-				nodeState.conn = network.NewWSConnectionWrapper()
+				if err := nodeState.conn.Start(ctx); err != nil {
+					return err
+				}
 				go donConnMgr.readLoop(nodeAddress, nodeState)
 			}
-			donConnMgr.closeWait.Add(len(donConnMgr.nodes))
+			donConnMgr.closeWait.Add(1)
+			go donConnMgr.keepaliveLoop(m.config.HeartbeatIntervalSec)
 		}
 		return m.wsServer.Start(ctx)
 	})
@@ -143,28 +178,26 @@ func (m *connectionManager) Close() error {
 
 func (m *connectionManager) StartHandshake(authHeader []byte) (attemptId string, challenge []byte, err error) {
 	m.lggr.Debug("StartHandshake")
-	nodeAddress, authHeaderElems, err := m.parseAuthHeader(authHeader)
+	authHeaderElems, signer, err := network.UnpackSignedAuthHeader(authHeader)
 	if err != nil {
-		return "", nil, err
+		return "", nil, multierr.Append(network.ErrAuthHeaderParse, err)
 	}
+	nodeAddress := "0x" + hex.EncodeToString(signer)
 	donConnMgr, ok := m.dons[authHeaderElems.DonId]
 	if !ok {
-		return "", nil, errors.New("invalid DON ID")
+		return "", nil, network.ErrAuthInvalidDonId
 	}
 	nodeState, ok := donConnMgr.nodes[nodeAddress]
 	if !ok {
-		return "", nil, errors.New("no such node")
+		return "", nil, network.ErrAuthInvalidNode
+	}
+	if authHeaderElems.GatewayId != m.config.AuthGatewayId {
+		return "", nil, network.ErrAuthInvalidGateway
 	}
 	nowTs := uint32(m.clock.Now().Unix())
 	ts := authHeaderElems.Timestamp
 	if ts < nowTs-m.config.AuthTimestampToleranceSec || nowTs+m.config.AuthTimestampToleranceSec < ts {
-		return "", nil, errors.New("timestamp out of tolerance zone")
-	}
-	nodeState.mu.RLock()
-	lastAcceptedTs := nodeState.lastAcceptedTs
-	nodeState.mu.RUnlock()
-	if ts <= lastAcceptedTs {
-		return "", nil, errors.New("timestamp too low")
+		return "", nil, network.ErrAuthInvalidTimestamp
 	}
 	attemptId, challenge, err = m.newAttempt(nodeState, nodeAddress, ts)
 	if err != nil {
@@ -173,65 +206,54 @@ func (m *connectionManager) StartHandshake(authHeader []byte) (attemptId string,
 	return attemptId, challenge, nil
 }
 
-func (m *connectionManager) parseAuthHeader(authHeader []byte) (nodeAddress string, authHeaderElems *network.AuthHeaderElems, err error) {
-	n := len(authHeader)
-	if n < network.HandshakeAuthHeaderMinLen {
-		return "", nil, errors.New("auth header too short")
-	}
-	authHeaderElems, err = network.Unpack(authHeader[:n-network.HandshakeSignatureLen])
-	if err != nil {
-		return "", nil, errors.New("unable to parse auth header")
-	}
-	signature := authHeader[n-network.HandshakeSignatureLen:]
-	signer, err := common.ValidateSignature(signature, authHeader[:n-network.HandshakeSignatureLen])
-	nodeAddress = "0x" + hex.EncodeToString(signer)
-	return
-}
-
 func (m *connectionManager) newAttempt(nodeSt *nodeState, nodeAddress string, timestamp uint32) (string, []byte, error) {
-	challenge := make([]byte, m.config.AuthChallengeLen)
-	_, err := rand.Read(challenge)
+	challengeBytes := make([]byte, m.config.AuthChallengeLen)
+	_, err := rand.Read(challengeBytes)
 	if err != nil {
 		return "", nil, err
 	}
+	challenge := network.ChallengeElems{Timestamp: timestamp, GatewayId: m.config.AuthGatewayId, ChallengeBytes: challengeBytes}
 	m.connAttemptsMu.Lock()
 	defer m.connAttemptsMu.Unlock()
 	m.connAttemptCounter++
 	newId := fmt.Sprintf("%s_%d", nodeAddress, m.connAttemptCounter)
 	m.connAttempts[newId] = &connAttempt{nodeState: nodeSt, nodeAddress: nodeAddress, challenge: challenge, timestamp: timestamp}
-	return newId, challenge, nil
+	return newId, network.PackChallenge(&challenge), nil
 }
 
 func (m *connectionManager) FinalizeHandshake(attemptId string, response []byte, conn *websocket.Conn) error {
-	m.lggr.Debug("FinalizeHandshake attempt: ", attemptId)
+	m.lggr.Debugw("FinalizeHandshake", "attemptId", attemptId)
 	m.connAttemptsMu.Lock()
 	attempt, ok := m.connAttempts[attemptId]
+	delete(m.connAttempts, attemptId)
 	m.connAttemptsMu.Unlock()
 	if !ok {
-		return errors.New("connection attempt not found")
+		return network.ErrChallengeAttemptNotFound
 	}
-	signer, err := common.ValidateSignature(response, attempt.challenge)
-	if err != nil {
-		return errors.New("invalid challenge response")
+	signer, err := common.ExtractSigner(response, network.PackChallenge(&attempt.challenge))
+	if err != nil || attempt.nodeAddress != "0x"+hex.EncodeToString(signer) {
+		return network.ErrChallengeInvalidSignature
 	}
-	if attempt.nodeAddress != "0x"+hex.EncodeToString(signer) {
-		return errors.New("invalid signer")
+	if conn != nil {
+		conn.SetPongHandler(func(data string) error {
+			m.lggr.Debugw("received keepalive pong from node", "nodeAddress", attempt.nodeAddress)
+			return nil
+		})
 	}
-	attempt.nodeState.mu.Lock()
-	defer attempt.nodeState.mu.Unlock()
-	if attempt.nodeState.lastAcceptedTs >= attempt.timestamp {
-		return errors.New("timestamp too low")
-	}
-	m.lggr.Infof("Node %s connected!", attempt.nodeAddress)
-	attempt.nodeState.conn.Restart(conn)
+	attempt.nodeState.conn.Reset(conn)
+	m.lggr.Infof("node %s connected", attempt.nodeAddress)
 	return nil
 }
 
 func (m *connectionManager) AbortHandshake(attemptId string) {
-	m.lggr.Debug("AbortHandshake attempt:", attemptId)
+	m.lggr.Debugw("AbortHandshake", "attemptId", attemptId)
 	m.connAttemptsMu.Lock()
 	defer m.connAttemptsMu.Unlock()
 	delete(m.connAttempts, attemptId)
+}
+
+func (m *connectionManager) GetPort() int {
+	return m.wsServer.GetPort()
 }
 
 func (m *donConnectionManager) SetHandler(handler handlers.Handler) {
@@ -239,15 +261,22 @@ func (m *donConnectionManager) SetHandler(handler handlers.Handler) {
 }
 
 func (m *donConnectionManager) SendToNode(ctx context.Context, nodeAddress string, msg *api.Message) error {
+	if msg == nil {
+		return errors.New("nil message")
+	}
 	data, err := m.codec.EncodeRequest(msg)
 	if err != nil {
 		return fmt.Errorf("error encoding request for node %s: %v", nodeAddress, err)
 	}
-	return m.nodes[nodeAddress].conn.Write(ctx, websocket.BinaryMessage, data)
+	nodeState := m.nodes[nodeAddress]
+	if nodeState == nil {
+		return fmt.Errorf("node %s not found", nodeAddress)
+	}
+	return nodeState.conn.Write(ctx, websocket.BinaryMessage, data)
 }
 
 func (m *donConnectionManager) readLoop(nodeAddress string, nodeState *nodeState) {
-	ctx, _ := utils.StopChan(m.shutdownCh).NewCtx()
+	ctx, _ := m.shutdownCh.NewCtx()
 	for {
 		select {
 		case <-m.shutdownCh:
@@ -256,13 +285,53 @@ func (m *donConnectionManager) readLoop(nodeAddress string, nodeState *nodeState
 		case item := <-nodeState.conn.ReadChannel():
 			msg, err := m.codec.DecodeResponse(item.Data)
 			if err != nil {
-				m.lggr.Error("parse error when reading from node ", nodeAddress, err)
+				m.lggr.Errorw("parse error when reading from node", "nodeAddress", nodeAddress, "err", err)
+				break
+			}
+			if err = msg.Validate(); err != nil {
+				m.lggr.Errorw("message validation error when reading from node", "nodeAddress", nodeAddress, "err", err)
+				break
+			}
+			if msg.Body.Sender != nodeAddress {
+				m.lggr.Errorw("message sender mismatch when reading from node", "nodeAddress", nodeAddress, "sender", msg.Body.Sender)
 				break
 			}
 			err = m.handler.HandleNodeMessage(ctx, msg, nodeAddress)
 			if err != nil {
 				m.lggr.Error("error when calling HandleNodeMessage ", err)
 			}
+		}
+	}
+}
+
+func (m *donConnectionManager) keepaliveLoop(intervalSec uint32) {
+	ctx, _ := m.shutdownCh.NewCtx()
+	defer m.closeWait.Done()
+
+	if intervalSec == 0 {
+		m.lggr.Errorw("keepalive interval is 0, keepalive disabled", "donID", m.donConfig.DonId)
+		return
+	}
+	m.lggr.Infow("starting keepalive loop", "donID", m.donConfig.DonId)
+
+	keepaliveTicker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+	defer keepaliveTicker.Stop()
+
+	for {
+		select {
+		case <-m.shutdownCh:
+			return
+		case <-keepaliveTicker.C:
+			errorCount := 0
+			for nodeAddress, nodeState := range m.nodes {
+				err := nodeState.conn.Write(ctx, websocket.PingMessage, []byte{})
+				if err != nil {
+					m.lggr.Debugw("unable to send keepalive ping to node", "nodeAddress", nodeAddress, "name", nodeState.name, "donID", m.donConfig.DonId, "err", err)
+					errorCount++
+				}
+			}
+			promKeepalivesSent.WithLabelValues(m.donConfig.DonId).Set(float64(len(m.nodes) - errorCount))
+			m.lggr.Infow("sent keepalive pings to nodes", "donID", m.donConfig.DonId, "errCount", errorCount)
 		}
 	}
 }

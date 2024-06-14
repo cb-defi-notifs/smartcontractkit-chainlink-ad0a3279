@@ -1,14 +1,13 @@
 package config
 
 var (
-	BaseOCRP2PV1Config = `[OCR]
+	BaseOCR1Config = `[OCR]
 Enabled = true
 
 [P2P]
-[P2P.V1]
-Enabled = true
-ListenIP = '0.0.0.0'
-ListenPort = 6690`
+[P2P.V2]
+AnnounceAddresses = ["0.0.0.0:6690"]
+ListenAddresses = ["0.0.0.0:6690"]`
 
 	BaseOCR2Config = `[Feature]
 LogPoller = true
@@ -18,7 +17,6 @@ Enabled = true
 
 [P2P]
 [P2P.V2]
-Enabled = true
 AnnounceAddresses = ["0.0.0.0:6690"]
 ListenAddresses = ["0.0.0.0:6690"]`
 
@@ -63,10 +61,10 @@ MaxSuccessfulRuns = 0
 
 [OCR2]
 Enabled = true
+CaptureEATelemetry = true
 
 [P2P]
 [P2P.V2]
-Enabled = true
 ListenAddresses = ['0.0.0.0:6690']`
 
 	TelemetryIngressConfig = `[TelemetryIngress]

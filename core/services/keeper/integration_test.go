@@ -16,9 +16,12 @@ import (
 	"github.com/smartcontractkit/libocr/gethwrappers/link_token_interface"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/forwarders"
+	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/authorized_forwarder"
 	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/basic_upkeep_contract"
 	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_logic1_3"
@@ -29,14 +32,10 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keeper"
-	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
-	"github.com/smartcontractkit/chainlink/v2/core/store/models"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 	webpresenters "github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
 
@@ -77,7 +76,7 @@ func deployKeeperRegistry(
 		require.NoError(t, err)
 		backend.Commit()
 
-		wrapper, err := keeper.NewRegistryWrapper(ethkey.EIP55AddressFromAddress(regAddr), backend)
+		wrapper, err := keeper.NewRegistryWrapper(evmtypes.EIP55AddressFromAddress(regAddr), backend)
 		require.NoError(t, err)
 		return regAddr, wrapper
 	case keeper.RegistryVersion_1_2:
@@ -104,7 +103,7 @@ func deployKeeperRegistry(
 		)
 		require.NoError(t, err)
 		backend.Commit()
-		wrapper, err := keeper.NewRegistryWrapper(ethkey.EIP55AddressFromAddress(regAddr), backend)
+		wrapper, err := keeper.NewRegistryWrapper(evmtypes.EIP55AddressFromAddress(regAddr), backend)
 		require.NoError(t, err)
 		return regAddr, wrapper
 	case keeper.RegistryVersion_1_3:
@@ -140,7 +139,7 @@ func deployKeeperRegistry(
 		)
 		require.NoError(t, err)
 		backend.Commit()
-		wrapper, err := keeper.NewRegistryWrapper(ethkey.EIP55AddressFromAddress(regAddr), backend)
+		wrapper, err := keeper.NewRegistryWrapper(evmtypes.EIP55AddressFromAddress(regAddr), backend)
 		require.NoError(t, err)
 		return regAddr, wrapper
 	default:
@@ -176,12 +175,13 @@ func TestKeeperEthIntegration(t *testing.T) {
 		test := tt
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+			ctx := testutils.Context(t)
 			g := gomega.NewWithT(t)
 
 			// setup node key
 			nodeKey := cltest.MustGenerateRandomKey(t)
 			nodeAddress := nodeKey.Address
-			nodeAddressEIP55 := ethkey.EIP55AddressFromAddress(nodeAddress)
+			nodeAddressEIP55 := evmtypes.EIP55AddressFromAddress(nodeAddress)
 
 			// setup blockchain
 			sergey := testutils.MustNewSimTransactor(t) // owns all the link
@@ -236,10 +236,10 @@ func TestKeeperEthIntegration(t *testing.T) {
 			backend.Commit()
 
 			// setup app
-			config, db := heavyweight.FullTestDBV2(t, fmt.Sprintf("keeper_eth_integration_%s", test.name), func(c *chainlink.Config, s *chainlink.Secrets) {
+			config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 				c.EVM[0].GasEstimator.EIP1559DynamicFees = &test.eip1559
-				c.Keeper.MaxGracePeriod = ptr[int64](0)                                 // avoid waiting to re-submit for upkeeps
-				c.Keeper.Registry.SyncInterval = models.MustNewDuration(24 * time.Hour) // disable full sync ticker for test
+				c.Keeper.MaxGracePeriod = ptr[int64](0)                                       // avoid waiting to re-submit for upkeeps
+				c.Keeper.Registry.SyncInterval = commonconfig.MustNewDuration(24 * time.Hour) // disable full sync ticker for test
 
 				c.Keeper.TurnLookBack = ptr[int64](0) // testing doesn't need to do far look back
 
@@ -247,16 +247,15 @@ func TestKeeperEthIntegration(t *testing.T) {
 				c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)    // disable reorg protection for this test
 				c.EVM[0].HeadTracker.MaxBufferSize = ptr[uint32](100) // helps prevent missed heads
 			})
-			scopedConfig := evmtest.NewChainScopedConfig(t, config)
-			korm := keeper.NewORM(db, logger.TestLogger(t), scopedConfig.Database())
+			korm := keeper.NewORM(db, logger.TestLogger(t))
 
 			app := cltest.NewApplicationWithConfigV2AndKeyOnSimulatedBlockchain(t, config, backend.Backend(), nodeKey)
-			require.NoError(t, app.Start(testutils.Context(t)))
+			require.NoError(t, app.Start(ctx))
 
 			// create job
-			regAddrEIP55 := ethkey.EIP55AddressFromAddress(regAddr)
+			regAddrEIP55 := evmtypes.EIP55AddressFromAddress(regAddr)
 			job := cltest.MustInsertKeeperJob(t, db, korm, nodeAddressEIP55, regAddrEIP55)
-			err = app.JobSpawner().StartService(testutils.Context(t), job)
+			err = app.JobSpawner().StartService(ctx, job)
 			require.NoError(t, err)
 
 			// keeper job is triggered and payload is received
@@ -285,7 +284,7 @@ func TestKeeperEthIntegration(t *testing.T) {
 			require.NoError(t, err)
 			backend.Commit()
 
-			cltest.WaitForCount(t, app.GetSqlxDB(), "upkeep_registrations", 0)
+			cltest.WaitForCount(t, app.GetDB(), "upkeep_registrations", 0)
 
 			// add new upkeep (same target contract)
 			registrationTx, err = registryWrapper.RegisterUpkeep(steve, upkeepAddr, 2_500_000, carrol.From, []byte{})
@@ -309,11 +308,11 @@ func TestKeeperEthIntegration(t *testing.T) {
 			require.NoError(t, err)
 
 			var registry keeper.Registry
-			require.NoError(t, app.GetSqlxDB().Get(&registry, `SELECT * FROM keeper_registries`))
-			cltest.AssertRecordEventually(t, app.GetSqlxDB(), &registry, fmt.Sprintf("SELECT * FROM keeper_registries WHERE id = %d", registry.ID), func() bool {
+			require.NoError(t, app.GetDB().GetContext(ctx, &registry, `SELECT * FROM keeper_registries`))
+			cltest.AssertRecordEventually(t, app.GetDB(), &registry, fmt.Sprintf("SELECT * FROM keeper_registries WHERE id = %d", registry.ID), func() bool {
 				return registry.KeeperIndex == -1
 			})
-			runs, err := app.PipelineORM().GetAllRuns()
+			runs, err := app.PipelineORM().GetAllRuns(ctx)
 			require.NoError(t, err)
 			// Since we set grace period to 0, we can have more than 1 pipeline run per perform
 			// This happens in case we start a pipeline run before previous perform tx is committed to chain
@@ -328,12 +327,13 @@ func TestKeeperEthIntegration(t *testing.T) {
 func TestKeeperForwarderEthIntegration(t *testing.T) {
 	t.Parallel()
 	t.Run("keeper_forwarder_flow", func(t *testing.T) {
+		ctx := testutils.Context(t)
 		g := gomega.NewWithT(t)
 
 		// setup node key
 		nodeKey := cltest.MustGenerateRandomKey(t)
 		nodeAddress := nodeKey.Address
-		nodeAddressEIP55 := ethkey.EIP55AddressFromAddress(nodeAddress)
+		nodeAddressEIP55 := evmtypes.EIP55AddressFromAddress(nodeAddress)
 
 		// setup blockchain
 		sergey := testutils.MustNewSimTransactor(t) // owns all the link
@@ -393,11 +393,11 @@ func TestKeeperForwarderEthIntegration(t *testing.T) {
 		backend.Commit()
 
 		// setup app
-		config, db := heavyweight.FullTestDBV2(t, "keeper_forwarder_flow", func(c *chainlink.Config, s *chainlink.Secrets) {
+		config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 			c.Feature.LogPoller = ptr(true)
 			c.EVM[0].GasEstimator.EIP1559DynamicFees = ptr(true)
-			c.Keeper.MaxGracePeriod = ptr[int64](0)                                 // avoid waiting to re-submit for upkeeps
-			c.Keeper.Registry.SyncInterval = models.MustNewDuration(24 * time.Hour) // disable full sync ticker for test
+			c.Keeper.MaxGracePeriod = ptr[int64](0)                                       // avoid waiting to re-submit for upkeeps
+			c.Keeper.Registry.SyncInterval = commonconfig.MustNewDuration(24 * time.Hour) // disable full sync ticker for test
 
 			c.Keeper.TurnLookBack = ptr[int64](0) // testing doesn't need to do far look back
 
@@ -405,24 +405,24 @@ func TestKeeperForwarderEthIntegration(t *testing.T) {
 			c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)    // disable reorg protection for this test
 			c.EVM[0].HeadTracker.MaxBufferSize = ptr[uint32](100) // helps prevent missed heads
 			c.EVM[0].Transactions.ForwardersEnabled = ptr(true)   // Enable Operator Forwarder flow
+			c.EVM[0].ChainID = (*ubig.Big)(testutils.SimulatedChainID)
 		})
-		scopedConfig := evmtest.NewChainScopedConfig(t, config)
-		korm := keeper.NewORM(db, logger.TestLogger(t), scopedConfig.Database())
+		korm := keeper.NewORM(db, logger.TestLogger(t))
 
 		app := cltest.NewApplicationWithConfigV2AndKeyOnSimulatedBlockchain(t, config, backend.Backend(), nodeKey)
-		require.NoError(t, app.Start(testutils.Context(t)))
+		require.NoError(t, app.Start(ctx))
 
-		forwarderORM := forwarders.NewORM(db, logger.TestLogger(t), config.Database())
-		chainID := utils.Big(*backend.ConfiguredChainID())
-		_, err = forwarderORM.CreateForwarder(fwdrAddress, chainID)
+		forwarderORM := forwarders.NewORM(db)
+		chainID := ubig.Big(*backend.ConfiguredChainID())
+		_, err = forwarderORM.CreateForwarder(ctx, fwdrAddress, chainID)
 		require.NoError(t, err)
 
-		addr, err := app.Chains.EVM.Chains()[0].TxManager().GetForwarderForEOA(nodeAddress)
+		addr, err := app.GetRelayers().LegacyEVMChains().Slice()[0].TxManager().GetForwarderForEOA(ctx, nodeAddress)
 		require.NoError(t, err)
 		require.Equal(t, addr, fwdrAddress)
 
 		// create job
-		regAddrEIP55 := ethkey.EIP55AddressFromAddress(regAddr)
+		regAddrEIP55 := evmtypes.EIP55AddressFromAddress(regAddr)
 
 		jb := job.Job{
 			ID:   1,
@@ -430,11 +430,12 @@ func TestKeeperForwarderEthIntegration(t *testing.T) {
 			KeeperSpec: &job.KeeperSpec{
 				FromAddress:     nodeAddressEIP55,
 				ContractAddress: regAddrEIP55,
+				EVMChainID:      (*ubig.Big)(testutils.SimulatedChainID),
 			},
 			SchemaVersion:     1,
 			ForwardingAllowed: true,
 		}
-		err = app.JobORM().CreateJob(&jb)
+		err = app.JobORM().CreateJob(testutils.Context(t), &jb)
 		require.NoError(t, err)
 
 		registry := keeper.Registry{
@@ -445,12 +446,12 @@ func TestKeeperForwarderEthIntegration(t *testing.T) {
 			JobID:             jb.ID,
 			KeeperIndex:       0,
 			NumKeepers:        2,
-			KeeperIndexMap: map[ethkey.EIP55Address]int32{
+			KeeperIndexMap: map[evmtypes.EIP55Address]int32{
 				nodeAddressEIP55: 0,
-				ethkey.EIP55AddressFromAddress(nelly.From): 1,
+				evmtypes.EIP55AddressFromAddress(nelly.From): 1,
 			},
 		}
-		err = korm.UpsertRegistry(&registry)
+		err = korm.UpsertRegistry(ctx, &registry)
 		require.NoError(t, err)
 
 		callOpts := bind.CallOpts{From: nodeAddress}
@@ -462,7 +463,7 @@ func TestKeeperForwarderEthIntegration(t *testing.T) {
 		}
 		require.Equal(t, lastKeeper(), common.Address{})
 
-		err = app.JobSpawner().StartService(testutils.Context(t), jb)
+		err = app.JobSpawner().StartService(ctx, jb)
 		require.NoError(t, err)
 
 		// keeper job is triggered and payload is received
@@ -481,13 +482,14 @@ func TestKeeperForwarderEthIntegration(t *testing.T) {
 func TestMaxPerformDataSize(t *testing.T) {
 	t.Parallel()
 	t.Run("max_perform_data_size_test", func(t *testing.T) {
+		ctx := testutils.Context(t)
 		maxPerformDataSize := 1000 // Will be set as config override
 		g := gomega.NewWithT(t)
 
 		// setup node key
 		nodeKey := cltest.MustGenerateRandomKey(t)
 		nodeAddress := nodeKey.Address
-		nodeAddressEIP55 := ethkey.EIP55AddressFromAddress(nodeAddress)
+		nodeAddressEIP55 := evmtypes.EIP55AddressFromAddress(nodeAddress)
 
 		// setup blockchain
 		sergey := testutils.MustNewSimTransactor(t) // owns all the link
@@ -538,10 +540,10 @@ func TestMaxPerformDataSize(t *testing.T) {
 		backend.Commit()
 
 		// setup app
-		config, db := heavyweight.FullTestDBV2(t, fmt.Sprintf("keeper_max_perform_data_test"), func(c *chainlink.Config, s *chainlink.Secrets) {
-			c.Keeper.MaxGracePeriod = ptr[int64](0)                                 // avoid waiting to re-submit for upkeeps
-			c.Keeper.Registry.SyncInterval = models.MustNewDuration(24 * time.Hour) // disable full sync ticker for test
-			c.Keeper.Registry.MaxPerformDataSize = ptr(uint32(maxPerformDataSize))  // set the max perform data size
+		config, db := heavyweight.FullTestDBV2(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+			c.Keeper.MaxGracePeriod = ptr[int64](0)                                       // avoid waiting to re-submit for upkeeps
+			c.Keeper.Registry.SyncInterval = commonconfig.MustNewDuration(24 * time.Hour) // disable full sync ticker for test
+			c.Keeper.Registry.MaxPerformDataSize = ptr(uint32(maxPerformDataSize))        // set the max perform data size
 
 			c.Keeper.TurnLookBack = ptr[int64](0) // testing doesn't need to do far look back
 
@@ -549,16 +551,15 @@ func TestMaxPerformDataSize(t *testing.T) {
 			c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)    // disable reorg protection for this test
 			c.EVM[0].HeadTracker.MaxBufferSize = ptr[uint32](100) // helps prevent missed heads
 		})
-		scopedConfig := evmtest.NewChainScopedConfig(t, config)
-		korm := keeper.NewORM(db, logger.TestLogger(t), scopedConfig.Database())
+		korm := keeper.NewORM(db, logger.TestLogger(t))
 
 		app := cltest.NewApplicationWithConfigV2AndKeyOnSimulatedBlockchain(t, config, backend.Backend(), nodeKey)
-		require.NoError(t, app.Start(testutils.Context(t)))
+		require.NoError(t, app.Start(ctx))
 
 		// create job
-		regAddrEIP55 := ethkey.EIP55AddressFromAddress(regAddr)
+		regAddrEIP55 := evmtypes.EIP55AddressFromAddress(regAddr)
 		job := cltest.MustInsertKeeperJob(t, db, korm, nodeAddressEIP55, regAddrEIP55)
-		err = app.JobSpawner().StartService(testutils.Context(t), job)
+		err = app.JobSpawner().StartService(ctx, job)
 		require.NoError(t, err)
 
 		// keeper job is triggered

@@ -9,21 +9,25 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/functions/encoding"
 )
 
-func TestABICodec_EncodeDecodeSuccess(t *testing.T) {
+func TestABICodec_EncodeDecodeV1Success(t *testing.T) {
 	t.Parallel()
-	codec, err := encoding.NewReportCodec()
+	codec, err := encoding.NewReportCodec(1)
 	require.NoError(t, err)
 
 	var report = []*encoding.ProcessedRequest{
 		{
-			RequestID: []byte(fmt.Sprintf("%032d", 123)),
-			Result:    []byte("abcd"),
-			Error:     []byte("err string"),
+			RequestID:           []byte(fmt.Sprintf("%032d", 123)),
+			Result:              []byte("abcd"),
+			Error:               []byte("err string"),
+			CoordinatorContract: []byte("contract_1"),
+			OnchainMetadata:     []byte("commitment_1"),
 		},
 		{
-			RequestID: []byte(fmt.Sprintf("%032d", 4321)),
-			Result:    []byte("0xababababab"),
-			Error:     []byte(""),
+			RequestID:           []byte(fmt.Sprintf("%032d", 4321)),
+			Result:              []byte("0xababababab"),
+			Error:               []byte(""),
+			CoordinatorContract: []byte("contract_2"),
+			OnchainMetadata:     []byte("commitment_2"),
 		},
 	}
 
@@ -37,6 +41,8 @@ func TestABICodec_EncodeDecodeSuccess(t *testing.T) {
 		require.Equal(t, report[i].RequestID, decoded[i].RequestID, "RequestIDs not equal at index %d", i)
 		require.Equal(t, report[i].Result, decoded[i].Result, "Results not equal at index %d", i)
 		require.Equal(t, report[i].Error, decoded[i].Error, "Errors not equal at index %d", i)
+		require.Equal(t, report[i].CoordinatorContract, decoded[i].CoordinatorContract, "Contracts not equal at index %d", i)
+		require.Equal(t, report[i].OnchainMetadata, decoded[i].OnchainMetadata, "Metadata not equal at index %d", i)
 	}
 }
 

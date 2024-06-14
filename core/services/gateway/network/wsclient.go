@@ -51,12 +51,17 @@ func (c *webSocketClient) Connect(ctx context.Context, url *url.URL) (*websocket
 	conn, resp, err := c.dialer.DialContext(ctx, url.String(), hdr)
 
 	if err != nil {
-		c.lggr.Errorf("WebSocketClient: couldn't connect to %s: %w", url.String(), err)
+		c.lggr.Errorf("WebSocketClient: couldn't connect to %s: %v", url.String(), err)
 		c.tryCloseConn(conn)
 		return nil, err
 	}
 
 	challengeStr := resp.Header.Get(WsServerHandshakeChallengeHeaderName)
+	if challengeStr == "" {
+		c.lggr.Error("WebSocketClient: empty challenge")
+		c.tryCloseConn(conn)
+		return nil, err
+	}
 	challenge, err := base64.StdEncoding.DecodeString(challengeStr)
 	if err != nil {
 		c.lggr.Errorf("WebSocketClient: couldn't decode challenge: %s: %v", challengeStr, err)
@@ -64,15 +69,15 @@ func (c *webSocketClient) Connect(ctx context.Context, url *url.URL) (*websocket
 		return nil, err
 	}
 
-	response, err := c.initiator.ChallengeResponse(challenge)
+	response, err := c.initiator.ChallengeResponse(url, challenge)
 	if err != nil {
-		c.lggr.Errorf("WebSocketClient: couldn't generate challenge response", err)
+		c.lggr.Error("WebSocketClient: couldn't generate challenge response; error: ", err)
 		c.tryCloseConn(conn)
 		return nil, err
 	}
 
 	if err = conn.WriteMessage(websocket.BinaryMessage, response); err != nil {
-		c.lggr.Errorf("WebSocketClient: couldn't send challenge response", err)
+		c.lggr.Error("WebSocketClient: couldn't send challenge response; error: ", err)
 		c.tryCloseConn(conn)
 		return nil, err
 	}
@@ -83,7 +88,7 @@ func (c *webSocketClient) tryCloseConn(conn *websocket.Conn) {
 	if conn != nil {
 		err := conn.Close()
 		if err != nil {
-			c.lggr.Errorf("WebSocketClient: error closing connection %w", err)
+			c.lggr.Errorf("WebSocketClient: error closing connection %v", err)
 		}
 	}
 }

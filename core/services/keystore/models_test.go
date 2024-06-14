@@ -98,9 +98,9 @@ func TestKeyRing_Encrypt_Decrypt(t *testing.T) {
 		}
 		// compare p2p keys
 		require.Equal(t, 2, len(decryptedKeyRing.P2P))
-		require.Equal(t, originalKeyRing.P2P[p2p1.ID()].GetPublic(), decryptedKeyRing.P2P[p2p1.ID()].GetPublic())
+		require.Equal(t, originalKeyRing.P2P[p2p1.ID()].PublicKeyHex(), decryptedKeyRing.P2P[p2p1.ID()].PublicKeyHex())
 		require.Equal(t, originalKeyRing.P2P[p2p1.ID()].PeerID(), decryptedKeyRing.P2P[p2p1.ID()].PeerID())
-		require.Equal(t, originalKeyRing.P2P[p2p2.ID()].GetPublic(), decryptedKeyRing.P2P[p2p2.ID()].GetPublic())
+		require.Equal(t, originalKeyRing.P2P[p2p2.ID()].PublicKeyHex(), decryptedKeyRing.P2P[p2p2.ID()].PublicKeyHex())
 		require.Equal(t, originalKeyRing.P2P[p2p2.ID()].PeerID(), decryptedKeyRing.P2P[p2p2.ID()].PeerID())
 		// compare solana keys
 		require.Equal(t, 2, len(decryptedKeyRing.Solana))
@@ -167,5 +167,4 @@ func TestKeyRing_Encrypt_Decrypt(t *testing.T) {
 		_, err = originalKeyRing.LegacyKeys.UnloadUnsupported(nil)
 		require.Error(t, err)
 	})
-
 }

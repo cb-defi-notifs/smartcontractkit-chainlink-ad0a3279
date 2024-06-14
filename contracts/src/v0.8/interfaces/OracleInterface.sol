@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+// solhint-disable-next-line interface-starts-with-i
 interface OracleInterface {
   function fulfillOracleRequest(
     bytes32 requestId,
@@ -10,8 +11,6 @@ interface OracleInterface {
     uint256 expiration,
     bytes32 data
   ) external returns (bool);
-
-  function isAuthorizedSender(address node) external view returns (bool);
 
   function withdraw(address recipient, uint256 amount) external;
 

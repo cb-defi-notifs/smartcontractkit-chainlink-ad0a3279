@@ -1,7 +1,7 @@
 package presenters
 
 import (
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
 )
 
 // StarkNetChainResource is an StarkNet chain JSONAPI resource.
@@ -36,7 +36,7 @@ func (r StarkNetNodeResource) GetName() string {
 // NewStarkNetNodeResource returns a new StarkNetNodeResource for node.
 func NewStarkNetNodeResource(node types.NodeStatus) StarkNetNodeResource {
 	return StarkNetNodeResource{NodeResource{
-		JAID:    NewJAID(node.Name),
+		JAID:    NewPrefixedJAID(node.Name, node.ChainID),
 		ChainID: node.ChainID,
 		Name:    node.Name,
 		State:   node.State,

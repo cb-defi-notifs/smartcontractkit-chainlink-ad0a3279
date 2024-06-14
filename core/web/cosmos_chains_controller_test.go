@@ -10,13 +10,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
 	coscfg "github.com/smartcontractkit/chainlink-cosmos/pkg/cosmos/config"
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/cosmos"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	configtest "github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest/v2"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/cosmostest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/web"
@@ -43,11 +42,12 @@ func Test_CosmosChainsController_Show(t *testing.T) {
 					Enabled: true,
 					Config: `ChainID = 'Chainlink-12'
 Enabled = true
+Bech32Prefix = 'wasm'
 BlockRate = '6s'
 BlocksUntilTxTimeout = 30
 ConfirmPollPeriod = '1s'
-FallbackGasPriceUAtom = '9.999'
-FCDURL = ''
+FallbackGasPrice = '9.999'
+GasToken = 'ucosm'
 GasLimitMultiplier = '1.55555'
 MaxMsgsPerBatch = 100
 OCR2CachePollPeriod = '4s'
@@ -75,12 +75,12 @@ Nodes = []
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			controller := setupCosmosChainsControllerTestV2(t, &cosmos.CosmosConfig{
+			controller := setupCosmosChainsControllerTestV2(t, &coscfg.TOMLConfig{
 				ChainID: ptr(validId),
 				Enabled: ptr(true),
 				Chain: coscfg.Chain{
-					FallbackGasPriceUAtom: ptr(decimal.RequireFromString("9.999")),
-					GasLimitMultiplier:    ptr(decimal.RequireFromString("1.55555")),
+					FallbackGasPrice:   ptr(decimal.RequireFromString("9.999")),
+					GasLimitMultiplier: ptr(decimal.RequireFromString("1.55555")),
 				}})
 
 			wantedResult := tc.want(t, controller.app)
@@ -105,15 +105,16 @@ Nodes = []
 func Test_CosmosChainsController_Index(t *testing.T) {
 	t.Parallel()
 
-	chainA := &cosmos.CosmosConfig{
-		ChainID: ptr(cosmostest.RandomChainID()),
+	chainA := &coscfg.TOMLConfig{
+		ChainID: ptr("a" + cosmostest.RandomChainID()),
 		Enabled: ptr(true),
 		Chain: coscfg.Chain{
-			FallbackGasPriceUAtom: ptr(decimal.RequireFromString("9.999")),
+			FallbackGasPrice: ptr(decimal.RequireFromString("9.999")),
 		},
 	}
-	chainB := &cosmos.CosmosConfig{
-		ChainID: ptr(cosmostest.RandomChainID()),
+
+	chainB := &coscfg.TOMLConfig{
+		ChainID: ptr("b" + cosmostest.RandomChainID()),
 		Enabled: ptr(true),
 		Chain: coscfg.Chain{
 			GasLimitMultiplier: ptr(decimal.RequireFromString("1.55555")),
@@ -171,7 +172,7 @@ type TestCosmosChainsController struct {
 	client cltest.HTTPClientCleaner
 }
 
-func setupCosmosChainsControllerTestV2(t *testing.T, cfgs ...*cosmos.CosmosConfig) *TestCosmosChainsController {
+func setupCosmosChainsControllerTestV2(t *testing.T, cfgs ...*coscfg.TOMLConfig) *TestCosmosChainsController {
 	for i := range cfgs {
 		cfgs[i].SetDefaults()
 	}
@@ -180,9 +181,10 @@ func setupCosmosChainsControllerTestV2(t *testing.T, cfgs ...*cosmos.CosmosConfi
 		c.EVM = nil
 	})
 	app := cltest.NewApplicationWithConfig(t, cfg)
-	require.NoError(t, app.Start(testutils.Context(t)))
+	ctx := testutils.Context(t)
+	require.NoError(t, app.Start(ctx))
 
-	client := app.NewHTTPClient(cltest.APIEmailAdmin)
+	client := app.NewHTTPClient(nil)
 
 	return &TestCosmosChainsController{
 		app:    app,

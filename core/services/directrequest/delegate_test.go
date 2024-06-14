@@ -13,25 +13,28 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink-common/pkg/assets"
+	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
+	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox/mailboxtest"
+
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
 	log_mocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/log/mocks"
+	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/operator_wrapper"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	configtest "github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest/v2"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/directrequest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
 	pipeline_mocks "github.com/smartcontractkit/chainlink/v2/core/services/pipeline/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/services/srvctest"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 )
 
 func TestDelegate_ServicesForSpec(t *testing.T) {
@@ -41,22 +44,23 @@ func TestDelegate_ServicesForSpec(t *testing.T) {
 	cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
 		c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
 	})
-	keyStore := cltest.NewKeyStore(t, db, cfg.Database())
-	mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
-	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, MailMon: mailMon, KeyStore: keyStore.Eth()})
+	keyStore := cltest.NewKeyStore(t, db)
+	mailMon := servicetest.Run(t, mailboxtest.NewMonitor(t))
+	relayerExtenders := evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, MailMon: mailMon, KeyStore: keyStore.Eth()})
 
 	lggr := logger.TestLogger(t)
-	delegate := directrequest.NewDelegate(lggr, runner, nil, cc, mailMon)
+	legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayerExtenders)
+	delegate := directrequest.NewDelegate(lggr, runner, nil, legacyChains, mailMon)
 
 	t.Run("Spec without DirectRequestSpec", func(t *testing.T) {
 		spec := job.Job{}
-		_, err := delegate.ServicesForSpec(spec)
+		_, err := delegate.ServicesForSpec(testutils.Context(t), spec)
 		assert.Error(t, err, "expects a *job.DirectRequestSpec to be present")
 	})
 
 	t.Run("Spec with DirectRequestSpec", func(t *testing.T) {
-		spec := job.Job{DirectRequestSpec: &job.DirectRequestSpec{}, PipelineSpec: &pipeline.Spec{}}
-		services, err := delegate.ServicesForSpec(spec)
+		spec := job.Job{DirectRequestSpec: &job.DirectRequestSpec{EVMChainID: (*ubig.Big)(testutils.FixtureChainID)}, PipelineSpec: &pipeline.Spec{}}
+		services, err := delegate.ServicesForSpec(testutils.Context(t), spec)
 		require.NoError(t, err)
 		assert.Len(t, services, 1)
 	})
@@ -78,26 +82,26 @@ func NewDirectRequestUniverseWithConfig(t *testing.T, cfg chainlink.GeneralConfi
 	runner := pipeline_mocks.NewRunner(t)
 	broadcaster.On("AddDependents", 1)
 
-	mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
+	mailMon := servicetest.Run(t, mailboxtest.NewMonitor(t))
 
 	db := pgtest.NewSqlxDB(t)
-	keyStore := cltest.NewKeyStore(t, db, cfg.Database())
-	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, LogBroadcaster: broadcaster, MailMon: mailMon, KeyStore: keyStore.Eth()})
+	keyStore := cltest.NewKeyStore(t, db)
+	relayExtenders := evmtest.NewChainRelayExtenders(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, LogBroadcaster: broadcaster, MailMon: mailMon, KeyStore: keyStore.Eth()})
 	lggr := logger.TestLogger(t)
-	orm := pipeline.NewORM(db, lggr, cfg.Database(), cfg.JobPipeline().MaxSuccessfulRuns())
-	btORM := bridges.NewORM(db, lggr, cfg.Database())
-
-	jobORM := job.NewORM(db, cc, orm, btORM, keyStore, lggr, cfg.Database())
-	delegate := directrequest.NewDelegate(lggr, runner, orm, cc, mailMon)
+	orm := pipeline.NewORM(db, lggr, cfg.JobPipeline().MaxSuccessfulRuns())
+	btORM := bridges.NewORM(db)
+	jobORM := job.NewORM(db, orm, btORM, keyStore, lggr)
+	legacyChains := evmrelay.NewLegacyChainsFromRelayerExtenders(relayExtenders)
+	delegate := directrequest.NewDelegate(lggr, runner, orm, legacyChains, mailMon)
 
 	jb := cltest.MakeDirectRequestJobSpec(t)
 	jb.ExternalJobID = uuid.New()
 	if specF != nil {
 		specF(jb)
 	}
-	err := jobORM.CreateJob(jb)
-	require.NoError(t, err)
-	serviceArray, err := delegate.ServicesForSpec(*jb)
+	ctx := testutils.Context(t)
+	require.NoError(t, jobORM.CreateJob(ctx, jb))
+	serviceArray, err := delegate.ServicesForSpec(ctx, *jb)
 	require.NoError(t, err)
 	assert.Len(t, serviceArray, 1)
 	service := serviceArray[0]
@@ -142,6 +146,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log.On("ReceiptsRoot").Return(common.Hash{})
 		log.On("TransactionsRoot").Return(common.Hash{})
 		log.On("StateRoot").Return(common.Hash{})
+		log.On("EVMChainID").Return(*big.NewInt(0))
 
 		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 		logOracleRequest := operator_wrapper.OperatorOracleRequest{
@@ -155,28 +160,29 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		})
 		log.On("DecodedLog").Return(&logOracleRequest)
 		log.On("String").Return("")
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 		runBeganAwaiter := cltest.NewAwaiter()
 		uni.runner.On("Run", mock.Anything, mock.AnythingOfType("*pipeline.Run"), mock.Anything, mock.Anything, mock.Anything).
 			Return(false, nil).
 			Run(func(args mock.Arguments) {
 				runBeganAwaiter.ItHappened()
-				fn := args.Get(4).(func(pg.Queryer) error)
+				fn := args.Get(4).(func(source sqlutil.DataSource) error)
 				require.NoError(t, fn(nil))
 			}).Once()
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
 		require.NotNil(t, uni.listener, "listener was nil; expected broadcaster.Register to have been called")
 		// check if the job exists under the correct ID
-		drJob, jErr := uni.jobORM.FindJob(testutils.Context(t), uni.listener.JobID())
+		drJob, jErr := uni.jobORM.FindJob(ctx, uni.listener.JobID())
 		require.NoError(t, jErr)
 		require.Equal(t, drJob.ID, uni.listener.JobID())
 		require.NotNil(t, drJob.DirectRequestSpec)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		runBeganAwaiter.AwaitOrFail(t, 5*time.Second)
 
@@ -202,12 +208,14 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		}).Maybe()
 		log.On("DecodedLog").Return(&logOracleRequest).Maybe()
 		log.On("String").Return("")
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil).Maybe()
+		log.On("EVMChainID").Return(*big.NewInt(0))
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 
@@ -219,7 +227,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		uni.runner.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 			Run(func(args mock.Arguments) {
 				runBeganAwaiter.ItHappened()
-				fn := args.Get(4).(func(pg.Queryer) error)
+				fn := args.Get(4).(func(sqlutil.DataSource) error)
 				require.NoError(t, fn(nil))
 			}).Once().Return(false, nil)
 
@@ -236,7 +244,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log := log_mocks.NewBroadcast(t)
 		lbAwaiter := cltest.NewAwaiter()
 		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Run(func(args mock.Arguments) { lbAwaiter.ItHappened() }).Return(nil)
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) { lbAwaiter.ItHappened() }).Return(nil)
 
 		logCancelOracleRequest := operator_wrapper.OperatorCancelOracleRequest{RequestId: uni.spec.ExternalIDEncodeStringToTopic()}
 		logAwaiter := cltest.NewAwaiter()
@@ -246,10 +254,11 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		})
 		log.On("String").Return("")
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		logAwaiter.AwaitOrFail(t)
 		lbAwaiter.AwaitOrFail(t)
@@ -274,12 +283,13 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log.On("String").Return("")
 		log.On("DecodedLog").Return(&logCancelOracleRequest)
 		lbAwaiter := cltest.NewAwaiter()
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Run(func(args mock.Arguments) { lbAwaiter.ItHappened() }).Return(nil)
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) { lbAwaiter.ItHappened() }).Return(nil)
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		lbAwaiter.AwaitOrFail(t)
 
@@ -294,6 +304,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		runLog.On("ReceiptsRoot").Return(common.Hash{})
 		runLog.On("TransactionsRoot").Return(common.Hash{})
 		runLog.On("StateRoot").Return(common.Hash{})
+		runLog.On("EVMChainID").Return(*big.NewInt(0))
 
 		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 		logOracleRequest := operator_wrapper.OperatorOracleRequest{
@@ -308,7 +319,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		})
 		runLog.On("DecodedLog").Return(&logOracleRequest)
 		runLog.On("String").Return("")
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 		cancelLog := log_mocks.NewBroadcast(t)
 
@@ -322,9 +333,10 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		})
 		cancelLog.On("DecodedLog").Return(&logCancelOracleRequest)
 		cancelLog.On("String").Return("")
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
 		timeout := 5 * time.Second
@@ -340,11 +352,11 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 				runCancelledAwaiter.ItHappened()
 			}
 		}).Once().Return(false, nil)
-		uni.listener.HandleLog(runLog)
+		uni.listener.HandleLog(ctx, runLog)
 
 		runBeganAwaiter.AwaitOrFail(t, timeout)
 
-		uni.listener.HandleLog(cancelLog)
+		uni.listener.HandleLog(ctx, cancelLog)
 
 		runCancelledAwaiter.AwaitOrFail(t, timeout)
 
@@ -363,6 +375,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log.On("ReceiptsRoot").Return(common.Hash{})
 		log.On("TransactionsRoot").Return(common.Hash{})
 		log.On("StateRoot").Return(common.Hash{})
+		log.On("EVMChainID").Return(*big.NewInt(0))
 
 		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 		logOracleRequest := operator_wrapper.OperatorOracleRequest{
@@ -377,25 +390,26 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		})
 		log.On("DecodedLog").Return(&logOracleRequest)
 		log.On("String").Return("")
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Return(nil)
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 		runBeganAwaiter := cltest.NewAwaiter()
 		uni.runner.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			runBeganAwaiter.ItHappened()
-			fn := args.Get(4).(func(pg.Queryer) error)
+			fn := args.Get(4).(func(sqlutil.DataSource) error)
 			require.NoError(t, fn(nil))
 		}).Once().Return(false, nil)
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
 		// check if the job exists under the correct ID
-		drJob, jErr := uni.jobORM.FindJob(testutils.Context(t), uni.listener.JobID())
+		drJob, jErr := uni.jobORM.FindJob(ctx, uni.listener.JobID())
 		require.NoError(t, jErr)
 		require.Equal(t, drJob.ID, uni.listener.JobID())
 		require.NotNil(t, drJob.DirectRequestSpec)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		runBeganAwaiter.AwaitOrFail(t, 5*time.Second)
 
@@ -426,14 +440,15 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log.On("DecodedLog").Return(&logOracleRequest)
 		log.On("String").Return("")
 		markConsumedLogAwaiter := cltest.NewAwaiter()
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			markConsumedLogAwaiter.ItHappened()
 		}).Return(nil)
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		markConsumedLogAwaiter.AwaitOrFail(t, 5*time.Second)
 
@@ -455,6 +470,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log.On("ReceiptsRoot").Return(common.Hash{})
 		log.On("TransactionsRoot").Return(common.Hash{})
 		log.On("StateRoot").Return(common.Hash{})
+		log.On("EVMChainID").Return(*big.NewInt(0))
 
 		uni.logBroadcaster.On("WasAlreadyConsumed", mock.Anything, mock.Anything).Return(false, nil)
 		logOracleRequest := operator_wrapper.OperatorOracleRequest{
@@ -471,27 +487,28 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log.On("DecodedLog").Return(&logOracleRequest)
 		log.On("String").Return("")
 		markConsumedLogAwaiter := cltest.NewAwaiter()
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			markConsumedLogAwaiter.ItHappened()
 		}).Return(nil)
 
 		runBeganAwaiter := cltest.NewAwaiter()
 		uni.runner.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			runBeganAwaiter.ItHappened()
-			fn := args.Get(4).(func(pg.Queryer) error)
+			fn := args.Get(4).(func(sqlutil.DataSource) error)
 			require.NoError(t, fn(nil))
 		}).Once().Return(false, nil)
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
 		// check if the job exists under the correct ID
-		drJob, jErr := uni.jobORM.FindJob(testutils.Context(t), uni.listener.JobID())
+		drJob, jErr := uni.jobORM.FindJob(ctx, uni.listener.JobID())
 		require.NoError(t, jErr)
 		require.Equal(t, drJob.ID, uni.listener.JobID())
 		require.NotNil(t, drJob.DirectRequestSpec)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		runBeganAwaiter.AwaitOrFail(t, 5*time.Second)
 
@@ -526,14 +543,15 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		log.On("DecodedLog").Return(&logOracleRequest)
 		log.On("String").Return("")
 		markConsumedLogAwaiter := cltest.NewAwaiter()
-		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		uni.logBroadcaster.On("MarkConsumed", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			markConsumedLogAwaiter.ItHappened()
 		}).Return(nil)
 
-		err := uni.service.Start(testutils.Context(t))
+		ctx := testutils.Context(t)
+		err := uni.service.Start(ctx)
 		require.NoError(t, err)
 
-		uni.listener.HandleLog(log)
+		uni.listener.HandleLog(ctx, log)
 
 		markConsumedLogAwaiter.AwaitOrFail(t, 5*time.Second)
 

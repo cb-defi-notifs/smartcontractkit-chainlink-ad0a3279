@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -10,17 +11,18 @@ import (
 	"sync"
 	"time"
 
-	gethabi "github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	ocr2config "github.com/smartcontractkit/libocr/offchainreporting2plus/confighelper"
-	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 	"github.com/umbracle/ethgo/abi"
+
+	ocr2config "github.com/smartcontractkit/libocr/offchainreporting2plus/confighelper"
+	"github.com/smartcontractkit/libocr/offchainreporting2plus/ocr3confighelper"
+	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 
 	"github.com/smartcontractkit/chainlink/core/scripts/chaincli/config"
 
-	offchain "github.com/smartcontractkit/ocr2keepers/pkg/config"
+	offchain20config "github.com/smartcontractkit/chainlink-automation/pkg/v2/config"
 
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
 	iregistry21 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/i_keeper_registry_master_wrapper_2_1"
@@ -47,14 +49,14 @@ type upkeepDeployer interface {
 type keepersDeployer interface {
 	canceller
 	upkeepDeployer
-	SetKeepers(opts *bind.TransactOpts, _ []cmd.HTTPClient, keepers []common.Address, payees []common.Address) (*types.Transaction, error)
+	SetKeepers(ctx context.Context, opts *bind.TransactOpts, _ []cmd.HTTPClient, keepers []common.Address, payees []common.Address) (*types.Transaction, error)
 }
 
 type v11KeeperDeployer struct {
 	registry11.KeeperRegistryInterface
 }
 
-func (d *v11KeeperDeployer) SetKeepers(opts *bind.TransactOpts, _ []cmd.HTTPClient, keepers []common.Address, payees []common.Address) (*types.Transaction, error) {
+func (d *v11KeeperDeployer) SetKeepers(ctx context.Context, opts *bind.TransactOpts, _ []cmd.HTTPClient, keepers []common.Address, payees []common.Address) (*types.Transaction, error) {
 	return d.KeeperRegistryInterface.SetKeepers(opts, keepers, payees)
 }
 
@@ -70,7 +72,7 @@ type v12KeeperDeployer struct {
 	registry12.KeeperRegistryInterface
 }
 
-func (d *v12KeeperDeployer) SetKeepers(opts *bind.TransactOpts, _ []cmd.HTTPClient, keepers []common.Address, payees []common.Address) (*types.Transaction, error) {
+func (d *v12KeeperDeployer) SetKeepers(ctx context.Context, opts *bind.TransactOpts, _ []cmd.HTTPClient, keepers []common.Address, payees []common.Address) (*types.Transaction, error) {
 	return d.KeeperRegistryInterface.SetKeepers(opts, keepers, payees)
 }
 
@@ -87,7 +89,7 @@ type v20KeeperDeployer struct {
 	cfg *config.Config
 }
 
-func (d *v20KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPClient, keepers []common.Address, _ []common.Address) (*types.Transaction, error) {
+func (d *v20KeeperDeployer) SetKeepers(ctx context.Context, opts *bind.TransactOpts, cls []cmd.HTTPClient, keepers []common.Address, _ []common.Address) (*types.Transaction, error) {
 	S := make([]int, len(cls))
 	oracleIdentities := make([]ocr2config.OracleIdentityExtra, len(cls))
 	sharedSecretEncryptionPublicKeys := make([]ocr2types.ConfigEncryptionPublicKey, len(cls))
@@ -97,12 +99,12 @@ func (d *v20KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 		go func(i int, cl cmd.HTTPClient) {
 			defer wg.Done()
 
-			ocr2Config, err := getNodeOCR2Config(cl)
+			ocr2Config, err := getNodeOCR2Config(ctx, cl)
 			if err != nil {
 				panic(err)
 			}
 
-			p2pKeyID, err := getP2PKeyID(cl)
+			p2pKeyID, err := getP2PKeyID(ctx, cl)
 			if err != nil {
 				panic(err)
 			}
@@ -149,7 +151,7 @@ func (d *v20KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 	}
 	wg.Wait()
 
-	offC, err := json.Marshal(offchain.OffchainConfig{
+	offC, err := json.Marshal(offchain20config.OffchainConfig{
 		PerformLockoutWindow: 100 * 3 * 1000, // ~100 block lockout (on mumbai)
 		MinConfirmations:     1,
 	})
@@ -227,7 +229,7 @@ type v21KeeperDeployer struct {
 	cfg *config.Config
 }
 
-func (d *v21KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPClient, keepers []common.Address, _ []common.Address) (*types.Transaction, error) {
+func (d *v21KeeperDeployer) SetKeepers(ctx context.Context, opts *bind.TransactOpts, cls []cmd.HTTPClient, keepers []common.Address, _ []common.Address) (*types.Transaction, error) {
 	S := make([]int, len(cls))
 	oracleIdentities := make([]ocr2config.OracleIdentityExtra, len(cls))
 	sharedSecretEncryptionPublicKeys := make([]ocr2types.ConfigEncryptionPublicKey, len(cls))
@@ -237,12 +239,12 @@ func (d *v21KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 		go func(i int, cl cmd.HTTPClient) {
 			defer wg.Done()
 
-			ocr2Config, err := getNodeOCR2Config(cl)
+			ocr2Config, err := getNodeOCR2Config(ctx, cl)
 			if err != nil {
 				panic(err)
 			}
 
-			p2pKeyID, err := getP2PKeyID(cl)
+			p2pKeyID, err := getP2PKeyID(ctx, cl)
 			if err != nil {
 				panic(err)
 			}
@@ -289,7 +291,7 @@ func (d *v21KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 	}
 	wg.Wait()
 
-	offC, err := json.Marshal(offchain.OffchainConfig{
+	offC, err := json.Marshal(offchain20config.OffchainConfig{
 		PerformLockoutWindow: 100 * 3 * 1000, // ~100 block lockout (on mumbai)
 		MinConfirmations:     1,
 		MercuryLookup:        d.cfg.UpkeepType == config.Mercury || d.cfg.UpkeepType == config.LogTriggeredFeedLookup,
@@ -298,11 +300,13 @@ func (d *v21KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 		panic(err)
 	}
 
-	signerOnchainPublicKeys, transmitterAccounts, f, _, offchainConfigVersion, offchainConfig, err := ocr2config.ContractSetConfigArgsForTests(
+	signerOnchainPublicKeys, transmitterAccounts, f, _, offchainConfigVersion, offchainConfig, err := ocr3confighelper.ContractSetConfigArgsForTests(
 		5*time.Second,         // deltaProgress time.Duration,
 		10*time.Second,        // deltaResend time.Duration,
+		400*time.Millisecond,  // deltaInitial time.Duration,
 		2500*time.Millisecond, // deltaRound time.Duration,
 		40*time.Millisecond,   // deltaGrace time.Duration,
+		300*time.Millisecond,  // deltaCertifiedCommitRequest time.Duration,
 		30*time.Second,        // deltaStage time.Duration,
 		50,                    // rMax uint8,
 		S,                     // s []int,
@@ -310,7 +314,6 @@ func (d *v21KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 		offC,                  // reportingPluginConfig []byte,
 		20*time.Millisecond,   // maxDurationQuery time.Duration,
 		1600*time.Millisecond, // maxDurationObservation time.Duration,
-		800*time.Millisecond,  // maxDurationReport time.Duration,
 		20*time.Millisecond,   // maxDurationShouldAcceptFinalizedReport time.Duration,
 		20*time.Millisecond,   // maxDurationShouldTransmitAcceptedReport time.Duration,
 		1,                     // f int,
@@ -336,28 +339,7 @@ func (d *v21KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 		transmitters = append(transmitters, common.HexToAddress(string(transmitter)))
 	}
 
-	onchainConfigType, err := gethabi.NewType("tuple", "", []gethabi.ArgumentMarshaling{
-		{Name: "payment_premiumPPB", Type: "uint32"},
-		{Name: "flat_fee_micro_link", Type: "uint32"},
-		{Name: "check_gas_limit", Type: "uint32"},
-		{Name: "staleness_seconds", Type: "uint24"},
-		{Name: "gas_ceiling_multiplier", Type: "uint16"},
-		{Name: "min_upkeep_spend", Type: "uint96"},
-		{Name: "max_perform_gas", Type: "uint32"},
-		{Name: "max_check_data_size", Type: "uint32"},
-		{Name: "max_perform_data_size", Type: "uint32"},
-		{Name: "max_revert_data_size", Type: "uint32"},
-		{Name: "fallback_gas_price", Type: "uint256"},
-		{Name: "fallback_link_price", Type: "uint256"},
-		{Name: "transcoder", Type: "address"},
-		{Name: "registrars", Type: "address[]"},
-		{Name: "upkeep_privilege_manager", Type: "address"},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error creating onChainConfigType: %v", err)
-	}
-	var args gethabi.Arguments = []gethabi.Argument{{Type: onchainConfigType}}
-	onchainConfig, err := args.Pack(iregistry21.KeeperRegistryBase21OnchainConfig{
+	onchainConfig := iregistry21.IAutomationV21PlusCommonOnchainConfigLegacy{
 		PaymentPremiumPPB:      d.cfg.PaymentPremiumPBB,
 		FlatFeeMicroLink:       d.cfg.FlatFeeMicroLink,
 		CheckGasLimit:          d.cfg.CheckGasLimit,
@@ -373,12 +355,9 @@ func (d *v21KeeperDeployer) SetKeepers(opts *bind.TransactOpts, cls []cmd.HTTPCl
 		Transcoder:             common.HexToAddress(d.cfg.Transcoder),
 		Registrars:             []common.Address{common.HexToAddress(d.cfg.Registrar)},
 		UpkeepPrivilegeManager: common.HexToAddress(d.cfg.UpkeepPrivilegeManager),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error packing onChainConfigType: %v", err)
 	}
 
-	return d.IKeeperRegistryMasterInterface.SetConfig(opts, signers, transmitters, f, onchainConfig, offchainConfigVersion, offchainConfig)
+	return d.IKeeperRegistryMasterInterface.SetConfigTypeSafe(opts, signers, transmitters, f, onchainConfig, offchainConfigVersion, offchainConfig)
 }
 
 // legacy support function

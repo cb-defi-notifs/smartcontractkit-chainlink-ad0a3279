@@ -8,10 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/web"
 	"github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
@@ -93,17 +93,17 @@ func TestDKGSignKeysController_Delete_HappyPath(t *testing.T) {
 	afterKeys, err := keyStore.DKGSign().GetAll()
 	assert.NoError(t, err)
 	assert.Equal(t, initialLength-1, len(afterKeys))
-
 }
 
 func setupDKGSignKeysControllerTests(t *testing.T) (cltest.HTTPClientCleaner, keystore.Master) {
 	t.Helper()
 
 	app := cltest.NewApplication(t)
-	require.NoError(t, app.Start(testutils.Context(t)))
-	require.NoError(t, app.KeyStore.DKGSign().Add(cltest.DefaultDKGSignKey))
+	ctx := testutils.Context(t)
+	require.NoError(t, app.Start(ctx))
+	require.NoError(t, app.KeyStore.DKGSign().Add(ctx, cltest.DefaultDKGSignKey))
 
-	client := app.NewHTTPClient(cltest.APIEmailAdmin)
+	client := app.NewHTTPClient(nil)
 
 	return client, app.GetKeyStore()
 }

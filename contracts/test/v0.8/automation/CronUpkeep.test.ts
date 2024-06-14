@@ -81,7 +81,7 @@ describe('CronUpkeep', () => {
     )
     cronDelegate = await cronDelegateFactory.deploy()
     const cronExternalFactory = await ethers.getContractFactory(
-      'src/v0.8/libraries/external/Cron.sol:Cron',
+      'src/v0.8/automation/libraries/external/Cron.sol:Cron',
       admin,
     )
     const cronExternalLib = await cronExternalFactory.deploy()
@@ -117,7 +117,7 @@ describe('CronUpkeep', () => {
   it('has a limited public ABI [ @skip-coverage ]', () => {
     // Casting cron is necessary due to a tricky versioning mismatch issue, likely between ethers
     // and typechain. Remove once the version issue is resolved.
-    // https://app.shortcut.com/chainlinklabs/story/21905/remove-contract-cast-in-cronupkeep-test-ts
+    // https://smartcontract-it.atlassian.net/browse/ARCHIVE-22094
     h.publicAbi(cron as unknown as Contract, [
       's_maxJobs',
       'performUpkeep',
@@ -321,12 +321,10 @@ describe('CronUpkeep', () => {
     it('creates jobs with sequential IDs', async () => {
       const cronString1 = '0 * * * *'
       const cronString2 = '0 1,2,3 */4 5-6 1-2'
-      const encodedSpec1 = await cronFactoryContract.encodeCronString(
-        cronString1,
-      )
-      const encodedSpec2 = await cronFactoryContract.encodeCronString(
-        cronString2,
-      )
+      const encodedSpec1 =
+        await cronFactoryContract.encodeCronString(cronString1)
+      const encodedSpec2 =
+        await cronFactoryContract.encodeCronString(cronString2)
       const nextTick1 = (
         await cronTestHelper.calculateNextTick(cronString1)
       ).toNumber()
@@ -399,7 +397,10 @@ describe('CronUpkeep', () => {
       for (let idx = 0; idx < 5; idx++) {
         await createBasicCron()
       }
-      await expect(createBasicCron()).to.be.revertedWith('ExceedsMaxJobs')
+      await expect(createBasicCron()).to.be.revertedWithCustomError(
+        cron,
+        'ExceedsMaxJobs',
+      )
     })
   })
 
@@ -455,7 +456,7 @@ describe('CronUpkeep', () => {
           handler2Sig,
           newEncodedSpec,
         ),
-      ).to.be.revertedWith(CRON_NOT_FOUND_ERR)
+      ).to.be.revertedWithCustomError(cron, CRON_NOT_FOUND_ERR)
     })
   })
 
@@ -467,8 +468,14 @@ describe('CronUpkeep', () => {
       await createBasicCron()
       await assertJobIDsEqual([1, 2, 3, 4])
       await cron.deleteCronJob(2)
-      await expect(cron.getCronJob(2)).to.be.revertedWith(CRON_NOT_FOUND_ERR)
-      await expect(cron.deleteCronJob(2)).to.be.revertedWith(CRON_NOT_FOUND_ERR)
+      await expect(cron.getCronJob(2)).to.be.revertedWithCustomError(
+        cron,
+        CRON_NOT_FOUND_ERR,
+      )
+      await expect(cron.deleteCronJob(2)).to.be.revertedWithCustomError(
+        cron,
+        CRON_NOT_FOUND_ERR,
+      )
       await assertJobIDsEqual([1, 3, 4])
       await cron.deleteCronJob(1)
       await assertJobIDsEqual([3, 4])
@@ -486,8 +493,14 @@ describe('CronUpkeep', () => {
     it('reverts if trying to delete a non-existent ID', async () => {
       await createBasicCron()
       await createBasicCron()
-      await expect(cron.deleteCronJob(0)).to.be.revertedWith(CRON_NOT_FOUND_ERR)
-      await expect(cron.deleteCronJob(3)).to.be.revertedWith(CRON_NOT_FOUND_ERR)
+      await expect(cron.deleteCronJob(0)).to.be.revertedWithCustomError(
+        cron,
+        CRON_NOT_FOUND_ERR,
+      )
+      await expect(cron.deleteCronJob(3)).to.be.revertedWithCustomError(
+        cron,
+        CRON_NOT_FOUND_ERR,
+      )
     })
   })
 
@@ -521,7 +534,7 @@ describe.skip('Cron Gas Usage', () => {
     )
     const cronDelegate = await cronDelegateFactory.deploy()
     const cronExternalFactory = await ethers.getContractFactory(
-      'src/v0.8/libraries/external/Cron.sol:Cron',
+      'src/v0.8/automation/libraries/external/Cron.sol:Cron',
       admin,
     )
     const cronExternalLib = await cronExternalFactory.deploy()

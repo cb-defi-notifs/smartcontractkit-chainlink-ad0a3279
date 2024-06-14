@@ -4,17 +4,19 @@ import (
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting/types"
 
 	evmconfig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
+	"github.com/smartcontractkit/chainlink/v2/core/config"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 )
 
 // Config contains OCR configurations for a job.
 type Config interface {
-	pg.QConfig
+	Insecure() config.Insecure
+	JobPipeline() config.JobPipeline
+	OCR() config.OCR
 }
 
 func toLocalConfig(cfg ValidationConfig, evmOcrConfig evmconfig.OCR, insecureCfg insecureConfig, spec job.OCROracleSpec, ocrConfig job.OCRConfig) ocrtypes.LocalConfig {
-	concreteSpec := job.LoadEnvConfigVarsLocalOCR(evmOcrConfig, spec, ocrConfig)
+	concreteSpec := job.LoadConfigVarsLocalOCR(evmOcrConfig, spec, ocrConfig)
 	lc := ocrtypes.LocalConfig{
 		BlockchainTimeout:                      concreteSpec.BlockchainTimeout.Duration(),
 		ContractConfigConfirmations:            concreteSpec.ContractConfigConfirmations,

@@ -7,9 +7,11 @@ import (
 
 	"github.com/smartcontractkit/wsrpc/credentials"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/services"
+
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/csakey"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/cache"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
@@ -58,7 +60,7 @@ func (conn *connection) checkout(ctx context.Context) (cco *clientCheckout, err 
 // not thread-safe, access must be serialized
 func (conn *connection) ensureStartedClient(ctx context.Context) error {
 	if len(conn.checkouts) == 0 {
-		conn.Client = conn.pool.newClient(conn.lggr, conn.clientPrivKey, conn.serverPubKey, conn.serverURL)
+		conn.Client = conn.pool.newClient(conn.lggr, conn.clientPrivKey, conn.serverPubKey, conn.serverURL, conn.pool.cacheSet)
 		return conn.Client.Start(ctx)
 	}
 	return nil
@@ -104,7 +106,7 @@ func (conn *connection) forceCloseAll() (err error) {
 }
 
 type Pool interface {
-	services.ServiceCtx
+	services.Service
 	// Checkout gets a wsrpc.Client for the given arguments
 	// The same underlying client can be checked out multiple times, the pool
 	// handles lifecycle management. The consumer can treat it as if it were
@@ -119,16 +121,20 @@ type pool struct {
 	connections map[string]map[credentials.StaticSizedPublicKey]*connection
 
 	// embedding newClient makes testing/mocking easier
-	newClient func(lggr logger.Logger, privKey csakey.KeyV2, serverPubKey []byte, serverURL string) Client
+	newClient func(lggr logger.Logger, privKey csakey.KeyV2, serverPubKey []byte, serverURL string, cacheSet cache.CacheSet) Client
 
 	mu sync.RWMutex
+
+	cacheSet cache.CacheSet
 
 	closed bool
 }
 
-func NewPool(lggr logger.Logger) Pool {
+func NewPool(lggr logger.Logger, cacheCfg cache.Config) Pool {
+	lggr = lggr.Named("Mercury.WSRPCPool")
 	p := newPool(lggr)
 	p.newClient = NewClient
+	p.cacheSet = cache.NewCacheSet(lggr, cacheCfg)
 	return p
 }
 
@@ -175,7 +181,6 @@ func (p *pool) remove(serverURL string, clientPubKey credentials.StaticSizedPubl
 	if len(p.connections[serverURL]) == 0 {
 		delete(p.connections, serverURL)
 	}
-
 }
 
 func (p *pool) newConnection(lggr logger.Logger, clientPrivKey csakey.KeyV2, serverPubKey []byte, serverURL string) *connection {
@@ -188,7 +193,9 @@ func (p *pool) newConnection(lggr logger.Logger, clientPrivKey csakey.KeyV2, ser
 	}
 }
 
-func (p *pool) Start(_ context.Context) error { return nil }
+func (p *pool) Start(ctx context.Context) error {
+	return p.cacheSet.Start(ctx)
+}
 
 func (p *pool) Close() (merr error) {
 	p.mu.Lock()
@@ -199,6 +206,7 @@ func (p *pool) Close() (merr error) {
 			merr = errors.Join(merr, conn.forceCloseAll())
 		}
 	}
+	merr = errors.Join(merr, p.cacheSet.Close())
 	return
 }
 
@@ -216,7 +224,7 @@ func (p *pool) Ready() error {
 }
 
 func (p *pool) HealthReport() map[string]error {
-	return map[string]error{
-		p.Name(): p.Ready(),
-	}
+	hp := map[string]error{p.Name(): p.Ready()}
+	services.CopyHealth(hp, p.cacheSet.HealthReport())
+	return hp
 }

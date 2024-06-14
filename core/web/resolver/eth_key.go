@@ -6,15 +6,16 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/graph-gophers/graphql-go"
 
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/v2/core/web/loader"
 )
 
 type ETHKey struct {
 	state ethkey.State
-	addr  ethkey.EIP55Address
-	chain evm.Chain
+	addr  types.EIP55Address
+	chain legacyevm.Chain
 }
 
 type ETHKeyResolver struct {
@@ -99,7 +100,7 @@ func (r *ETHKeyResolver) MaxGasPriceWei() *string {
 		return nil
 	}
 
-	gasPrice := r.key.chain.Config().EVM().KeySpecificMaxGasPriceWei(r.key.addr.Address())
+	gasPrice := r.key.chain.Config().EVM().GasEstimator().PriceMaxKey(r.key.addr.Address())
 
 	if gasPrice != nil {
 		val := gasPrice.ToInt().String()

@@ -1,23 +1,29 @@
 package fee
 
 import (
+	"fmt"
+	"math"
 	"math/big"
-
-	bigmath "github.com/smartcontractkit/chainlink/v2/core/utils/big_math"
 
 	"github.com/shopspring/decimal"
 )
 
-func GetMaxFeePrice(userSpecifiedMax, maxFee *big.Int) *big.Int {
-	return bigmath.Min(userSpecifiedMax, maxFee)
+func ApplyMultiplier(feeLimit uint64, multiplier float32) (uint64, error) {
+	result := decimal.NewFromBigInt(big.NewInt(0).SetUint64(feeLimit), 0).Mul(decimal.NewFromFloat32(multiplier))
+
+	if result.GreaterThan(decimal.NewFromBigInt(big.NewInt(0).SetUint64(math.MaxUint64), 0)) {
+		return 0, fmt.Errorf("integer overflow when applying multiplier of %f to fee limit of %d", multiplier, feeLimit)
+	}
+	return result.BigInt().Uint64(), nil
 }
 
-func CapFeePrice(calculatedFeePrice, userSpecifiedMax, maxFeePriceWei *big.Int, feeLimit uint32, multiplier float32) (maxFeePrice *big.Int, chainSpecificFeeLimit uint32) {
-	chainSpecificFeeLimit = ApplyMultiplier(feeLimit, multiplier)
-	maxFeePrice = GetMaxFeePrice(userSpecifiedMax, maxFeePriceWei)
-	return bigmath.Min(calculatedFeePrice, maxFeePrice), chainSpecificFeeLimit
+// Returns the input value increased by the given percentage.
+func addPercentage(value *big.Int, percentage uint16) *big.Int {
+	bumped := new(big.Int)
+	bumped.Mul(value, big.NewInt(int64(100+percentage)))
+	bumped.Div(bumped, big.NewInt(100))
+	return bumped
 }
 
-func ApplyMultiplier(feeLimit uint32, multiplier float32) uint32 {
-	return uint32(decimal.NewFromBigInt(big.NewInt(0).SetUint64(uint64(feeLimit)), 0).Mul(decimal.NewFromFloat32(multiplier)).IntPart())
-}
+// Returns the fee in its chain specific unit.
+type feeUnitToChainUnit func(fee *big.Int) string

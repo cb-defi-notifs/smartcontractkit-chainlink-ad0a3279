@@ -1,6 +1,7 @@
 package keystore
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"sort"
@@ -12,9 +13,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/pkg/errors"
 
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
@@ -22,57 +22,57 @@ import (
 //
 //go:generate mockery --quiet --name Eth --output mocks/ --case=underscore
 type Eth interface {
-	Get(id string) (ethkey.KeyV2, error)
-	GetAll() ([]ethkey.KeyV2, error)
-	Create(chainIDs ...*big.Int) (ethkey.KeyV2, error)
-	Delete(id string) (ethkey.KeyV2, error)
-	Import(keyJSON []byte, password string, chainIDs ...*big.Int) (ethkey.KeyV2, error)
-	Export(id string, password string) ([]byte, error)
+	Get(ctx context.Context, id string) (ethkey.KeyV2, error)
+	GetAll(ctx context.Context) ([]ethkey.KeyV2, error)
+	Create(ctx context.Context, chainIDs ...*big.Int) (ethkey.KeyV2, error)
+	Delete(ctx context.Context, id string) (ethkey.KeyV2, error)
+	Import(ctx context.Context, keyJSON []byte, password string, chainIDs ...*big.Int) (ethkey.KeyV2, error)
+	Export(ctx context.Context, id string, password string) ([]byte, error)
 
-	Enable(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error
-	Disable(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error
-	Add(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error
-	Reset(address common.Address, chainID *big.Int, nonce int64, qopts ...pg.QOpt) error
+	Enable(ctx context.Context, address common.Address, chainID *big.Int) error
+	Disable(ctx context.Context, address common.Address, chainID *big.Int) error
+	Add(ctx context.Context, address common.Address, chainID *big.Int) error
 
-	NextSequence(address common.Address, chainID *big.Int, qopts ...pg.QOpt) (evmtypes.Nonce, error)
-	IncrementNextSequence(address common.Address, chainID *big.Int, currentNonce evmtypes.Nonce, qopts ...pg.QOpt) error
+	EnsureKeys(ctx context.Context, chainIDs ...*big.Int) error
+	SubscribeToKeyChanges(ctx context.Context) (ch chan struct{}, unsub func())
 
-	EnsureKeys(chainIDs ...*big.Int) error
-	SubscribeToKeyChanges() (ch chan struct{}, unsub func())
+	SignTx(ctx context.Context, fromAddress common.Address, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error)
 
-	SignTx(fromAddress common.Address, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error)
+	EnabledKeysForChain(ctx context.Context, chainID *big.Int) (keys []ethkey.KeyV2, err error)
+	GetRoundRobinAddress(ctx context.Context, chainID *big.Int, addresses ...common.Address) (address common.Address, err error)
+	CheckEnabled(ctx context.Context, address common.Address, chainID *big.Int) error
 
-	EnabledKeysForChain(chainID *big.Int) (keys []ethkey.KeyV2, err error)
-	GetRoundRobinAddress(chainID *big.Int, addresses ...common.Address) (address common.Address, err error)
-	CheckEnabled(address common.Address, chainID *big.Int) error
+	GetState(ctx context.Context, id string, chainID *big.Int) (ethkey.State, error)
+	GetStatesForKeys(ctx context.Context, keys []ethkey.KeyV2) ([]ethkey.State, error)
+	GetStateForKey(ctx context.Context, key ethkey.KeyV2) (ethkey.State, error)
+	GetStatesForChain(ctx context.Context, chainID *big.Int) ([]ethkey.State, error)
+	EnabledAddressesForChain(ctx context.Context, chainID *big.Int) (addresses []common.Address, err error)
 
-	GetState(id string, chainID *big.Int) (ethkey.State, error)
-	GetStatesForKeys([]ethkey.KeyV2) ([]ethkey.State, error)
-	GetStateForKey(ethkey.KeyV2) (ethkey.State, error)
-	GetStatesForChain(chainID *big.Int) ([]ethkey.State, error)
-	EnabledAddressesForChain(chainID *big.Int) (addresses []common.Address, err error)
-
-	XXXTestingOnlySetState(ethkey.State)
-	XXXTestingOnlyAdd(key ethkey.KeyV2)
+	XXXTestingOnlySetState(ctx context.Context, keyState ethkey.State)
+	XXXTestingOnlyAdd(ctx context.Context, key ethkey.KeyV2)
 }
 
 type eth struct {
 	*keyManager
+	keystateORM
+	ds            sqlutil.DataSource
 	subscribers   [](chan struct{})
 	subscribersMu *sync.RWMutex
 }
 
 var _ Eth = &eth{}
 
-func newEthKeyStore(km *keyManager) *eth {
+func newEthKeyStore(km *keyManager, orm keystateORM, ds sqlutil.DataSource) *eth {
 	return &eth{
+		keystateORM:   orm,
 		keyManager:    km,
+		ds:            ds,
 		subscribers:   make([](chan struct{}), 0),
 		subscribersMu: new(sync.RWMutex),
 	}
 }
 
-func (ks *eth) Get(id string) (ethkey.KeyV2, error) {
+func (ks *eth) Get(ctx context.Context, id string) (ethkey.KeyV2, error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	if ks.isLocked() {
@@ -81,17 +81,17 @@ func (ks *eth) Get(id string) (ethkey.KeyV2, error) {
 	return ks.getByID(id)
 }
 
-func (ks *eth) GetAll() (keys []ethkey.KeyV2, _ error) {
+func (ks *eth) GetAll(ctx context.Context) (keys []ethkey.KeyV2, _ error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	if ks.isLocked() {
 		return nil, ErrLocked
 	}
-	return ks.getAll(), nil
+	return ks.getAll(ctx), nil
 }
 
 // caller must hold lock!
-func (ks *eth) getAll() (keys []ethkey.KeyV2) {
+func (ks *eth) getAll(ctx context.Context) (keys []ethkey.KeyV2) {
 	for _, key := range ks.keyRing.Eth {
 		keys = append(keys, key)
 	}
@@ -100,7 +100,7 @@ func (ks *eth) getAll() (keys []ethkey.KeyV2) {
 }
 
 // Create generates a fresh new key and enables it for the given chain IDs
-func (ks *eth) Create(chainIDs ...*big.Int) (ethkey.KeyV2, error) {
+func (ks *eth) Create(ctx context.Context, chainIDs ...*big.Int) (ethkey.KeyV2, error) {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	if ks.isLocked() {
@@ -110,10 +110,11 @@ func (ks *eth) Create(chainIDs ...*big.Int) (ethkey.KeyV2, error) {
 	if err != nil {
 		return ethkey.KeyV2{}, err
 	}
-	err = ks.add(key, chainIDs...)
-	if err == nil {
-		ks.notify()
+	err = ks.add(ctx, key, chainIDs...)
+	if err != nil {
+		return ethkey.KeyV2{}, errors.Wrap(err, "unable to add eth key")
 	}
+	ks.notify()
 	ks.logger.Infow(fmt.Sprintf("Created EVM key with ID %s", key.Address.Hex()), "address", key.Address.Hex(), "evmChainIDs", chainIDs)
 	return key, err
 }
@@ -121,7 +122,7 @@ func (ks *eth) Create(chainIDs ...*big.Int) (ethkey.KeyV2, error) {
 // EnsureKeys ensures that each chain has at least one key with a state
 // linked to that chain. If a key and state exists for a chain but it is
 // disabled, we do not enable it automatically here.
-func (ks *eth) EnsureKeys(chainIDs ...*big.Int) (err error) {
+func (ks *eth) EnsureKeys(ctx context.Context, chainIDs ...*big.Int) (err error) {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	if ks.isLocked() {
@@ -137,9 +138,9 @@ func (ks *eth) EnsureKeys(chainIDs ...*big.Int) (err error) {
 		if err != nil {
 			return err
 		}
-		err = ks.add(newKey, chainID)
+		err = ks.add(ctx, newKey, chainID)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to add key %s for chain %s: %w", newKey.Address, chainID, err)
 		}
 		ks.logger.Infow(fmt.Sprintf("Created EVM key with ID %s", newKey.Address.Hex()), "address", newKey.Address.Hex(), "evmChainID", chainID)
 	}
@@ -147,7 +148,7 @@ func (ks *eth) EnsureKeys(chainIDs ...*big.Int) (err error) {
 	return nil
 }
 
-func (ks *eth) Import(keyJSON []byte, password string, chainIDs ...*big.Int) (ethkey.KeyV2, error) {
+func (ks *eth) Import(ctx context.Context, keyJSON []byte, password string, chainIDs ...*big.Int) (ethkey.KeyV2, error) {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	if ks.isLocked() {
@@ -161,7 +162,7 @@ func (ks *eth) Import(keyJSON []byte, password string, chainIDs ...*big.Int) (et
 	if _, found := ks.keyRing.Eth[key.ID()]; found {
 		return ethkey.KeyV2{}, ErrKeyExists
 	}
-	err = ks.add(key, chainIDs...)
+	err = ks.add(ctx, key, chainIDs...)
 	if err != nil {
 		return ethkey.KeyV2{}, errors.Wrap(err, "unable to add eth key")
 	}
@@ -169,7 +170,7 @@ func (ks *eth) Import(keyJSON []byte, password string, chainIDs ...*big.Int) (et
 	return key, nil
 }
 
-func (ks *eth) Export(id string, password string) ([]byte, error) {
+func (ks *eth) Export(ctx context.Context, id string, password string) ([]byte, error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	if ks.isLocked() {
@@ -182,70 +183,29 @@ func (ks *eth) Export(id string, password string) ([]byte, error) {
 	return key.ToEncryptedJSON(password, ks.scryptParams)
 }
 
-// Get the next nonce for the given key and chain. It is safest to always to go the DB for this
-func (ks *eth) NextSequence(address common.Address, chainID *big.Int, qopts ...pg.QOpt) (nonce evmtypes.Nonce, err error) {
-	if !ks.exists(address) {
-		return evmtypes.Nonce(0), errors.Errorf("key with address %s does not exist", address.String())
-	}
-	nonceVal, err := ks.orm.getNextNonce(address, chainID, qopts...)
-	if err != nil {
-		return evmtypes.Nonce(0), errors.Wrap(err, "NextSequence failed")
-	}
-	ks.lock.Lock()
-	defer ks.lock.Unlock()
-	state, exists := ks.keyStates.KeyIDChainID[address.String()][chainID.String()]
-	if !exists {
-		return evmtypes.Nonce(0), errors.Errorf("state not found for address %s, chainID %s", address, chainID.String())
-	}
-	if state.Disabled {
-		return evmtypes.Nonce(0), errors.Errorf("state is disabled for address %s, chainID %s", address, chainID.String())
-	}
-	// Always clobber the memory nonce with the DB nonce
-	state.NextNonce = nonceVal
-	return evmtypes.Nonce(nonceVal), nil
-}
-
-// IncrementNextNonce increments keys.next_nonce by 1
-func (ks *eth) IncrementNextSequence(address common.Address, chainID *big.Int, currentSequence evmtypes.Nonce, qopts ...pg.QOpt) error {
-	if !ks.exists(address) {
-		return errors.Errorf("key with address %s does not exist", address.String())
-	}
-	incrementedNonce, err := ks.orm.incrementNextNonce(address, chainID, currentSequence.Int64(), qopts...)
-	if err != nil {
-		return errors.Wrap(err, "failed IncrementNextNonce")
-	}
-	ks.lock.Lock()
-	defer ks.lock.Unlock()
-	state, exists := ks.keyStates.KeyIDChainID[address.String()][chainID.String()]
-	if !exists {
-		return errors.Errorf("state not found for address %s, chainID %s", address, chainID.String())
-	}
-	if state.Disabled {
-		return errors.Errorf("state is disabled for address %s, chainID %s", address, chainID.String())
-	}
-	state.NextNonce = incrementedNonce
-	return nil
-}
-
-func (ks *eth) Add(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error {
+func (ks *eth) Add(ctx context.Context, address common.Address, chainID *big.Int) error {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	_, found := ks.keyRing.Eth[address.Hex()]
 	if !found {
 		return ErrKeyNotFound
 	}
-	return ks.addKey(address, chainID, qopts...)
+	return ks.addKey(ctx, nil, address, chainID)
 }
 
 // caller must hold lock!
-func (ks *eth) addKey(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error {
+// ds is optional, for transactions
+func (ks *eth) addKey(ctx context.Context, ds sqlutil.DataSource, address common.Address, chainID *big.Int) error {
+	if ds == nil {
+		ds = ks.ds
+	}
 	state := new(ethkey.State)
-	sql := `INSERT INTO evm_key_states (address, next_nonce, disabled, evm_chain_id, created_at, updated_at)
-			VALUES ($1, 0, false, $2, NOW(), NOW()) 
+	sql := `INSERT INTO evm.key_states (address, disabled, evm_chain_id, created_at, updated_at)
+			VALUES ($1, false, $2, NOW(), NOW()) 
 			RETURNING *;`
-	q := ks.orm.q.WithOpts(qopts...)
-	if err := q.Get(state, sql, address, chainID.String()); err != nil {
-		return errors.Wrap(err, "failed to insert evm_key_state")
+
+	if err := ds.GetContext(ctx, state, sql, address, chainID.String()); err != nil {
+		return errors.Wrap(err, "failed to insert key_state")
 	}
 	// consider: do we really need a cache of the keystates?
 	ks.keyStates.add(state)
@@ -253,80 +213,64 @@ func (ks *eth) addKey(address common.Address, chainID *big.Int, qopts ...pg.QOpt
 	return nil
 }
 
-func (ks *eth) Enable(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error {
+func (ks *eth) Enable(ctx context.Context, address common.Address, chainID *big.Int) error {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	_, found := ks.keyRing.Eth[address.Hex()]
 	if !found {
 		return ErrKeyNotFound
 	}
-	return ks.enable(address, chainID, qopts...)
+	return ks.enable(ctx, address, chainID)
 }
 
 // caller must hold lock!
-func (ks *eth) enable(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error {
+func (ks *eth) enable(ctx context.Context, address common.Address, chainID *big.Int) error {
 	state := new(ethkey.State)
-	q := ks.orm.q.WithOpts(qopts...)
-	sql := `UPDATE evm_key_states SET disabled = false, updated_at = NOW() WHERE address = $1 AND evm_chain_id = $2
-			RETURNING *;`
-	if err := q.Get(state, sql, address, chainID.String()); err != nil {
+	sql := `INSERT INTO evm.key_states as key_states ("address", "evm_chain_id", "disabled", "created_at", "updated_at") VALUES ($1, $2, false, NOW(), NOW())
+			ON CONFLICT ("address", "evm_chain_id") DO UPDATE SET "disabled" = false, "updated_at" = NOW() WHERE key_states."address" = $1 AND key_states."evm_chain_id" = $2
+    		RETURNING *;`
+	if err := ks.ds.GetContext(ctx, state, sql, address, chainID.String()); err != nil {
 		return errors.Wrap(err, "failed to enable state")
 	}
 
-	ks.keyStates.enable(address, chainID, state.UpdatedAt)
+	if state.CreatedAt.Equal(state.UpdatedAt) {
+		ks.keyStates.add(state)
+	} else {
+		ks.keyStates.enable(address, chainID, state.UpdatedAt)
+	}
 	ks.notify()
 	return nil
 }
 
-func (ks *eth) Disable(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error {
+func (ks *eth) Disable(ctx context.Context, address common.Address, chainID *big.Int) error {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	_, found := ks.keyRing.Eth[address.Hex()]
 	if !found {
 		return errors.Errorf("no key exists with ID %s", address.Hex())
 	}
-	return ks.disable(address, chainID, qopts...)
+	return ks.disable(ctx, address, chainID)
 }
 
-func (ks *eth) disable(address common.Address, chainID *big.Int, qopts ...pg.QOpt) error {
+func (ks *eth) disable(ctx context.Context, address common.Address, chainID *big.Int) error {
 	state := new(ethkey.State)
-	q := ks.orm.q.WithOpts(qopts...)
-	sql := `UPDATE evm_key_states SET disabled = false, updated_at = NOW() WHERE address = $1 AND evm_chain_id = $2
-			RETURNING id, next_nonce, address, evm_chain_id, disabled, created_at, updated_at;`
-	if err := q.Get(state, sql, address, chainID.String()); err != nil {
-		return errors.Wrap(err, "failed to enable state")
+	sql := `INSERT INTO evm.key_states as key_states ("address", "evm_chain_id", "disabled", "created_at", "updated_at") VALUES ($1, $2, true, NOW(), NOW())
+			ON CONFLICT ("address", "evm_chain_id") DO UPDATE SET "disabled" = true, "updated_at" = NOW() WHERE key_states."address" = $1 AND key_states."evm_chain_id" = $2
+			RETURNING *;`
+	if err := ks.ds.GetContext(ctx, state, sql, address, chainID.String()); err != nil {
+		return errors.Wrap(err, "failed to disable state")
 	}
 
-	ks.keyStates.disable(address, chainID, state.UpdatedAt)
+	if state.CreatedAt.Equal(state.UpdatedAt) {
+		ks.keyStates.add(state)
+	} else {
+		ks.keyStates.disable(address, chainID, state.UpdatedAt)
+	}
 	ks.notify()
 	return nil
 }
 
-// Reset the key/chain nonce to the given one
-func (ks *eth) Reset(address common.Address, chainID *big.Int, nonce int64, qopts ...pg.QOpt) error {
-	q := ks.orm.q.WithOpts(qopts...)
-	res, err := q.Exec(`UPDATE evm_key_states SET next_nonce = $1 WHERE address = $2 AND evm_chain_id = $3`, nonce, address, chainID.String())
-	if err != nil {
-		return errors.Wrap(err, "failed to reset state")
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return errors.Wrap(err, "failed to get RowsAffected")
-	}
-	if rowsAffected == 0 {
-		return errors.Errorf("key state not found with address %s and chainID %s", address.Hex(), chainID.String())
-	}
-	ks.lock.Lock()
-	defer ks.lock.Unlock()
-	state, exists := ks.keyStates.KeyIDChainID[address.Hex()][chainID.String()]
-	if !exists {
-		return errors.Errorf("state not found for address %s, chainID %s", address.Hex(), chainID.String())
-	}
-	state.NextNonce = nonce
-	return nil
-}
-
-func (ks *eth) Delete(id string) (ethkey.KeyV2, error) {
+func (ks *eth) Delete(ctx context.Context, id string) (ethkey.KeyV2, error) {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	if ks.isLocked() {
@@ -336,8 +280,8 @@ func (ks *eth) Delete(id string) (ethkey.KeyV2, error) {
 	if err != nil {
 		return ethkey.KeyV2{}, err
 	}
-	err = ks.safeRemoveKey(key, func(tx pg.Queryer) error {
-		_, err2 := tx.Exec(`DELETE FROM evm_key_states WHERE address = $1`, key.Address)
+	err = ks.safeRemoveKey(ctx, key, func(ds sqlutil.DataSource) error {
+		_, err2 := ds.ExecContext(ctx, `DELETE FROM evm.key_states WHERE address = $1`, key.Address)
 		return err2
 	})
 	if err != nil {
@@ -348,7 +292,7 @@ func (ks *eth) Delete(id string) (ethkey.KeyV2, error) {
 	return key, nil
 }
 
-func (ks *eth) SubscribeToKeyChanges() (ch chan struct{}, unsub func()) {
+func (ks *eth) SubscribeToKeyChanges(ctx context.Context) (ch chan struct{}, unsub func()) {
 	ch = make(chan struct{}, 1)
 	ks.subscribersMu.Lock()
 	defer ks.subscribersMu.Unlock()
@@ -365,7 +309,7 @@ func (ks *eth) SubscribeToKeyChanges() (ch chan struct{}, unsub func()) {
 	}
 }
 
-func (ks *eth) SignTx(address common.Address, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
+func (ks *eth) SignTx(ctx context.Context, address common.Address, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	if ks.isLocked() {
@@ -380,7 +324,7 @@ func (ks *eth) SignTx(address common.Address, tx *types.Transaction, chainID *bi
 }
 
 // EnabledKeysForChain returns all keys that are enabled for the given chain
-func (ks *eth) EnabledKeysForChain(chainID *big.Int) (sendingKeys []ethkey.KeyV2, err error) {
+func (ks *eth) EnabledKeysForChain(ctx context.Context, chainID *big.Int) (sendingKeys []ethkey.KeyV2, err error) {
 	if chainID == nil {
 		return nil, errors.New("chainID must be non-nil")
 	}
@@ -392,7 +336,7 @@ func (ks *eth) EnabledKeysForChain(chainID *big.Int) (sendingKeys []ethkey.KeyV2
 	return ks.enabledKeysForChain(chainID), nil
 }
 
-func (ks *eth) GetRoundRobinAddress(chainID *big.Int, whitelist ...common.Address) (common.Address, error) {
+func (ks *eth) GetRoundRobinAddress(ctx context.Context, chainID *big.Int, whitelist ...common.Address) (common.Address, error) {
 	if chainID == nil {
 		return common.Address{}, errors.New("chainID must be non-nil")
 	}
@@ -441,7 +385,7 @@ func (ks *eth) GetRoundRobinAddress(chainID *big.Int, whitelist ...common.Addres
 
 // CheckEnabled returns nil if state is present and enabled
 // The complexity here comes because we want to return nice, useful error messages
-func (ks *eth) CheckEnabled(address common.Address, chainID *big.Int) error {
+func (ks *eth) CheckEnabled(ctx context.Context, address common.Address, chainID *big.Int) error {
 	if utils.IsZero(address) {
 		return errors.Errorf("empty address provided as input")
 	}
@@ -483,7 +427,7 @@ func (ks *eth) CheckEnabled(address common.Address, chainID *big.Int) error {
 	return nil
 }
 
-func (ks *eth) GetState(id string, chainID *big.Int) (ethkey.State, error) {
+func (ks *eth) GetState(ctx context.Context, id string, chainID *big.Int) (ethkey.State, error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	if ks.isLocked() {
@@ -496,7 +440,7 @@ func (ks *eth) GetState(id string, chainID *big.Int) (ethkey.State, error) {
 	return *state, nil
 }
 
-func (ks *eth) GetStatesForKeys(keys []ethkey.KeyV2) (states []ethkey.State, err error) {
+func (ks *eth) GetStatesForKeys(ctx context.Context, keys []ethkey.KeyV2) (states []ethkey.State, err error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	for _, state := range ks.keyStates.All {
@@ -511,7 +455,7 @@ func (ks *eth) GetStatesForKeys(keys []ethkey.KeyV2) (states []ethkey.State, err
 }
 
 // Useful to fetch the ChainID for a given key
-func (ks *eth) GetStateForKey(key ethkey.KeyV2) (state ethkey.State, err error) {
+func (ks *eth) GetStateForKey(ctx context.Context, key ethkey.KeyV2) (state ethkey.State, err error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	for _, state := range ks.keyStates.All {
@@ -523,7 +467,7 @@ func (ks *eth) GetStateForKey(key ethkey.KeyV2) (state ethkey.State, err error) 
 	return
 }
 
-func (ks *eth) GetStatesForChain(chainID *big.Int) (states []ethkey.State, err error) {
+func (ks *eth) GetStatesForChain(ctx context.Context, chainID *big.Int) (states []ethkey.State, err error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	if ks.isLocked() {
@@ -536,7 +480,7 @@ func (ks *eth) GetStatesForChain(chainID *big.Int) (states []ethkey.State, err e
 	return
 }
 
-func (ks *eth) EnabledAddressesForChain(chainID *big.Int) (addresses []common.Address, err error) {
+func (ks *eth) EnabledAddressesForChain(ctx context.Context, chainID *big.Int) (addresses []common.Address, err error) {
 	ks.lock.RLock()
 	defer ks.lock.RUnlock()
 	if chainID == nil {
@@ -554,29 +498,8 @@ func (ks *eth) EnabledAddressesForChain(chainID *big.Int) (addresses []common.Ad
 	return
 }
 
-func (ks *eth) getV1KeysAsV2() (keys []ethkey.KeyV2, nonces []int64, fundings []bool, _ error) {
-	v1Keys, err := ks.orm.GetEncryptedV1EthKeys()
-	if err != nil {
-		return nil, nil, nil, errors.Wrap(err, "failed to get encrypted v1 eth keys")
-	}
-	if len(v1Keys) == 0 {
-		return nil, nil, nil, nil
-	}
-	for _, keyV1 := range v1Keys {
-		dKey, err := keystore.DecryptKey(keyV1.JSON, ks.password)
-		if err != nil {
-			return nil, nil, nil, errors.Wrapf(err, "could not decrypt eth key %s", keyV1.Address.Hex())
-		}
-		keyV2 := ethkey.FromPrivateKey(dKey.PrivateKey)
-		keys = append(keys, keyV2)
-		nonces = append(nonces, keyV1.NextNonce)
-		fundings = append(fundings, keyV1.IsFunding)
-	}
-	return keys, nonces, fundings, nil
-}
-
 // XXXTestingOnlySetState is only used in tests to manually update a key's state
-func (ks *eth) XXXTestingOnlySetState(state ethkey.State) {
+func (ks *eth) XXXTestingOnlySetState(ctx context.Context, state ethkey.State) {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	if ks.isLocked() {
@@ -587,16 +510,16 @@ func (ks *eth) XXXTestingOnlySetState(state ethkey.State) {
 		panic(fmt.Sprintf("key not found with ID %s", state.KeyID()))
 	}
 	*existingState = state
-	sql := `UPDATE evm_key_states SET address = :address, next_nonce = :next_nonce, is_disabled = :is_disabled, evm_chain_id = :evm_chain_id, updated_at = NOW()
+	sql := `UPDATE evm.key_states SET address = :address, is_disabled = :is_disabled, evm_chain_id = :evm_chain_id, updated_at = NOW()
 	WHERE address = :address;`
-	_, err := ks.orm.q.NamedExec(sql, state)
+	_, err := ks.ds.NamedExecContext(ctx, sql, state)
 	if err != nil {
 		panic(err.Error())
 	}
 }
 
 // XXXTestingOnlyAdd is only used in tests to manually add a key
-func (ks *eth) XXXTestingOnlyAdd(key ethkey.KeyV2) {
+func (ks *eth) XXXTestingOnlyAdd(ctx context.Context, key ethkey.KeyV2) {
 	ks.lock.Lock()
 	defer ks.lock.Unlock()
 	if ks.isLocked() {
@@ -605,7 +528,7 @@ func (ks *eth) XXXTestingOnlyAdd(key ethkey.KeyV2) {
 	if _, found := ks.keyRing.Eth[key.ID()]; found {
 		panic(fmt.Sprintf("key with ID %s already exists", key.ID()))
 	}
-	err := ks.add(key)
+	err := ks.add(ctx, key)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -618,13 +541,6 @@ func (ks *eth) getByID(id string) (ethkey.KeyV2, error) {
 		return ethkey.KeyV2{}, ErrKeyNotFound
 	}
 	return key, nil
-}
-
-func (ks *eth) exists(address common.Address) bool {
-	ks.lock.RLock()
-	defer ks.lock.RUnlock()
-	_, found := ks.keyRing.Eth[address.Hex()]
-	return found
 }
 
 // caller must hold lock!
@@ -649,10 +565,10 @@ func (ks *eth) keysForChain(chainID *big.Int, includeDisabled bool) (keys []ethk
 }
 
 // caller must hold lock!
-func (ks *eth) add(key ethkey.KeyV2, chainIDs ...*big.Int) (err error) {
-	err = ks.safeAddKey(key, func(tx pg.Queryer) (serr error) {
+func (ks *eth) add(ctx context.Context, key ethkey.KeyV2, chainIDs ...*big.Int) (err error) {
+	err = ks.safeAddKey(ctx, key, func(tx sqlutil.DataSource) (serr error) {
 		for _, chainID := range chainIDs {
-			if serr = ks.addKey(key.Address, chainID, pg.WithQueryer(tx)); serr != nil {
+			if serr = ks.addKey(ctx, tx, key.Address, chainID); serr != nil {
 				return serr
 			}
 		}
@@ -661,24 +577,6 @@ func (ks *eth) add(key ethkey.KeyV2, chainIDs ...*big.Int) (err error) {
 	if len(chainIDs) > 0 {
 		ks.notify()
 	}
-	return err
-}
-
-func (ks *eth) addWithNonce(key ethkey.KeyV2, chainID *big.Int, nonce int64, isDisabled bool) (err error) {
-	ks.lock.Lock()
-	defer ks.lock.Unlock()
-	err = ks.safeAddKey(key, func(tx pg.Queryer) (merr error) {
-		state := new(ethkey.State)
-		sql := `INSERT INTO evm_key_states (address, next_nonce, disabled, evm_chain_id, created_at, updated_at)
-VALUES ($1, $2, $3, $4, NOW(), NOW()) RETURNING *;`
-		if err = ks.orm.q.Get(state, sql, key.Address, nonce, isDisabled, chainID); err != nil {
-			return errors.Wrap(err, "failed to insert evm_key_state")
-		}
-
-		ks.keyStates.add(state)
-		return nil
-	})
-	ks.notify()
 	return err
 }
 

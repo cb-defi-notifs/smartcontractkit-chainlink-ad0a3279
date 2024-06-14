@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/smartcontractkit/chainlink/v2/core/auth"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
@@ -22,7 +24,7 @@ func TestPingController_Show_APICredentials(t *testing.T) {
 	app := cltest.NewApplicationEVMDisabled(t)
 	require.NoError(t, app.Start(testutils.Context(t)))
 
-	client := app.NewHTTPClient(cltest.APIEmailAdmin)
+	client := app.NewHTTPClient(nil)
 
 	resp, cleanup := client.Get("/v2/ping")
 	defer cleanup()
@@ -33,9 +35,10 @@ func TestPingController_Show_APICredentials(t *testing.T) {
 
 func TestPingController_Show_ExternalInitiatorCredentials(t *testing.T) {
 	t.Parallel()
+	ctx := testutils.Context(t)
 
 	app := cltest.NewApplicationEVMDisabled(t)
-	require.NoError(t, app.Start(testutils.Context(t)))
+	require.NoError(t, app.Start(ctx))
 
 	eia := &auth.Token{
 		AccessKey: "abracadabra",
@@ -43,17 +46,17 @@ func TestPingController_Show_ExternalInitiatorCredentials(t *testing.T) {
 	}
 	eir_url := cltest.WebURL(t, "http://localhost:8888")
 	eir := &bridges.ExternalInitiatorRequest{
-		Name: "bitcoin",
+		Name: uuid.New().String(),
 		URL:  &eir_url,
 	}
 
 	ei, err := bridges.NewExternalInitiator(eia, eir)
 	require.NoError(t, err)
-	err = app.BridgeORM().CreateExternalInitiator(ei)
+	err = app.BridgeORM().CreateExternalInitiator(ctx, ei)
 	require.NoError(t, err)
 
 	url := app.Server.URL + "/v2/ping"
-	request, err := http.NewRequest("GET", url, nil)
+	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", web.MediaType)
 	request.Header.Set("X-Chainlink-EA-AccessKey", eia.AccessKey)
@@ -72,12 +75,15 @@ func TestPingController_Show_ExternalInitiatorCredentials(t *testing.T) {
 func TestPingController_Show_NoCredentials(t *testing.T) {
 	t.Parallel()
 
+	ctx := testutils.Context(t)
 	app := cltest.NewApplicationEVMDisabled(t)
-	require.NoError(t, app.Start(testutils.Context(t)))
+	require.NoError(t, app.Start(ctx))
 
 	client := clhttptest.NewTestLocalOnlyHTTPClient()
 	url := app.Server.URL + "/v2/ping"
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }

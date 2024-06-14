@@ -24,6 +24,11 @@ func Test_NewChainType(t *testing.T) {
 			want: ChainTypeEVM,
 		},
 		{
+			name: "Starknet Chain Type",
+			give: "STARKNET",
+			want: ChainTypeStarknet,
+		},
+		{
 			name:    "Invalid Chain Type",
 			give:    "",
 			want:    ChainTypeUnknown,
@@ -64,6 +69,10 @@ func Test_ToPluginType(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, pt, PluginTypeMercury)
 
+	pt, err = ToPluginType("rebalancer")
+	require.NoError(t, err)
+	assert.Equal(t, pt, PluginTypeRebalancer)
+
 	pt, err = ToPluginType("xxx")
 	require.Error(t, err)
 	assert.Equal(t, pt, PluginTypeUnknown)
@@ -77,6 +86,7 @@ func Test_FromPluginType(t *testing.T) {
 	assert.Equal(t, "execute", FromPluginTypeInput(PluginTypeExecute))
 	assert.Equal(t, "median", FromPluginTypeInput(PluginTypeMedian))
 	assert.Equal(t, "mercury", FromPluginTypeInput(PluginTypeMercury))
+	assert.Equal(t, "rebalancer", FromPluginTypeInput(PluginTypeRebalancer))
 	assert.Equal(t, "unknown", FromPluginTypeInput(PluginTypeUnknown))
 }
 
@@ -241,12 +251,13 @@ func Test_Plugins_Value(t *testing.T) {
 
 	var (
 		give = Plugins{
-			Commit:  true,
-			Execute: true,
-			Median:  false,
-			Mercury: true,
+			Commit:     true,
+			Execute:    true,
+			Median:     false,
+			Mercury:    true,
+			Rebalancer: false,
 		}
-		want = `{"commit":true,"execute":true,"median":false,"mercury":true}`
+		want = `{"commit":true,"execute":true,"median":false,"mercury":true,"rebalancer":false}`
 	)
 
 	val, err := give.Value()
@@ -262,12 +273,13 @@ func Test_Plugins_Scan(t *testing.T) {
 	t.Parallel()
 
 	var (
-		give = `{"commit":true,"execute":true,"median":false,"mercury":true}`
+		give = `{"commit":true,"execute":true,"median":false,"mercury":true,"rebalancer":false}`
 		want = Plugins{
-			Commit:  true,
-			Execute: true,
-			Median:  false,
-			Mercury: true,
+			Commit:     true,
+			Execute:    true,
+			Median:     false,
+			Mercury:    true,
+			Rebalancer: false,
 		}
 	)
 
@@ -283,19 +295,21 @@ func Test_OCR2Config_Value(t *testing.T) {
 
 	var (
 		give = OCR2ConfigModel{
-			Enabled:     true,
-			IsBootstrap: false,
-			Multiaddr:   null.StringFrom("multiaddr"),
-			P2PPeerID:   null.StringFrom("peerid"),
-			KeyBundleID: null.StringFrom("ocrkeyid"),
+			Enabled:          true,
+			IsBootstrap:      false,
+			Multiaddr:        null.StringFrom("multiaddr"),
+			ForwarderAddress: null.StringFrom("forwarderaddress"),
+			P2PPeerID:        null.StringFrom("peerid"),
+			KeyBundleID:      null.StringFrom("ocrkeyid"),
 			Plugins: Plugins{
-				Commit:  true,
-				Execute: true,
-				Median:  false,
-				Mercury: true,
+				Commit:     true,
+				Execute:    true,
+				Median:     false,
+				Mercury:    true,
+				Rebalancer: false,
 			},
 		}
-		want = `{"enabled":true,"is_bootstrap":false,"multiaddr":"multiaddr","p2p_peer_id":"peerid","key_bundle_id":"ocrkeyid","plugins":{"commit":true,"execute":true,"median":false,"mercury":true}}`
+		want = `{"enabled":true,"is_bootstrap":false,"multiaddr":"multiaddr","forwarder_address":"forwarderaddress","p2p_peer_id":"peerid","key_bundle_id":"ocrkeyid","plugins":{"commit":true,"execute":true,"median":false,"mercury":true,"rebalancer":false}}`
 	)
 
 	val, err := give.Value()
@@ -311,18 +325,20 @@ func Test_OCR2Config_Scan(t *testing.T) {
 	t.Parallel()
 
 	var (
-		give = `{"enabled":true,"is_bootstrap":false,"multiaddr":"multiaddr","p2p_peer_id":"peerid","key_bundle_id":"ocrkeyid","plugins":{"commit":true,"execute":true,"median":false,"mercury":true}}`
+		give = `{"enabled":true,"is_bootstrap":false,"multiaddr":"multiaddr","forwarder_address":"forwarderaddress","p2p_peer_id":"peerid","key_bundle_id":"ocrkeyid","plugins":{"commit":true,"execute":true,"median":false,"mercury":true,"rebalancer":false}}`
 		want = OCR2ConfigModel{
-			Enabled:     true,
-			IsBootstrap: false,
-			Multiaddr:   null.StringFrom("multiaddr"),
-			P2PPeerID:   null.StringFrom("peerid"),
-			KeyBundleID: null.StringFrom("ocrkeyid"),
+			Enabled:          true,
+			IsBootstrap:      false,
+			Multiaddr:        null.StringFrom("multiaddr"),
+			ForwarderAddress: null.StringFrom("forwarderaddress"),
+			P2PPeerID:        null.StringFrom("peerid"),
+			KeyBundleID:      null.StringFrom("ocrkeyid"),
 			Plugins: Plugins{
-				Commit:  true,
-				Execute: true,
-				Median:  false,
-				Mercury: true,
+				Commit:     true,
+				Execute:    true,
+				Median:     false,
+				Mercury:    true,
+				Rebalancer: false,
 			},
 		}
 	)
@@ -373,4 +389,29 @@ func Test_JobProposal_CanEditDefinition(t *testing.T) {
 			assert.Equal(t, tc.want, jp.CanEditDefinition())
 		})
 	}
+}
+
+// Test_toMetrics tests the toMetrics method
+func Test_toMetrics(t *testing.T) {
+	t.Parallel()
+
+	jpCounts := JobProposalCounts{
+		Cancelled: 0,
+		Pending:   1,
+		Approved:  2,
+		Rejected:  3,
+		Deleted:   4,
+		Revoked:   5,
+	}
+
+	metrics := jpCounts.toMetrics()
+
+	assert.Equal(t, metrics, map[JobProposalStatus]float64{
+		JobProposalStatusCancelled: 0,
+		JobProposalStatusPending:   1,
+		JobProposalStatusApproved:  2,
+		JobProposalStatusRejected:  3,
+		JobProposalStatusDeleted:   4,
+		JobProposalStatusRevoked:   5,
+	})
 }

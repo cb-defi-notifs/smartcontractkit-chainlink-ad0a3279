@@ -38,6 +38,11 @@ CPUProfileRate = 7
 [[EVM]]
 ChainID = '1'
 FinalityDepth = 26
+FinalityTagEnabled = false
+
+[EVM.OCR2]
+[EVM.OCR2.Automation]
+GasLimit = 10500000
 
 [[EVM.Nodes]]
 Name = 'primary'
@@ -70,6 +75,8 @@ WSURL = 'wss://web.socket/test/bar'
 
 [[Cosmos]]
 ChainID = 'Ibiza-808'
+Bech32Prefix = 'wasm'
+GasToken = 'ucosm'
 MaxMsgsPerBatch = 13
 
 [[Cosmos.Nodes]]
@@ -78,7 +85,9 @@ TendermintURL = 'http://columbus.cosmos.com'
 
 [[Cosmos]]
 ChainID = 'Malaga-420'
+Bech32Prefix = 'wasm'
 BlocksUntilTxTimeout = 20
+GasToken = 'ucosm'
 
 [[Cosmos.Nodes]]
 Name = 'secondary'
@@ -102,8 +111,10 @@ URL = 'http://testnet.solana.com'
 
 [[Starknet]]
 ChainID = 'foobar'
+FeederURL = 'http://feeder.url'
 ConfirmationPoll = '1h0m0s'
 
 [[Starknet.Nodes]]
 Name = 'primary'
 URL = 'http://stark.node'
+APIKey = 'key'

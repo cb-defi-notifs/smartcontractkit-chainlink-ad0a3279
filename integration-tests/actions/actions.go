@@ -2,37 +2,55 @@
 package actions
 
 import (
+	"context"
+	"crypto/ecdsa"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/go-resty/resty/v2"
+	"github.com/rs/zerolog"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
-	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/smartcontractkit/chainlink-env/environment"
+	"github.com/smartcontractkit/seth"
+
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
 	ctfClient "github.com/smartcontractkit/chainlink-testing-framework/client"
+	"github.com/smartcontractkit/chainlink-testing-framework/k8s/environment"
+	"github.com/smartcontractkit/chainlink-testing-framework/logging"
 	"github.com/smartcontractkit/chainlink-testing-framework/testreporters"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils"
-
+	"github.com/smartcontractkit/chainlink-testing-framework/utils/conversions"
+	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
+	"github.com/smartcontractkit/chainlink/integration-tests/docker/test_env"
 )
 
 // ContractDeploymentInterval After how many contract actions to wait before starting any more
 // Example: When deploying 1000 contracts, stop every ContractDeploymentInterval have been deployed to wait before continuing
 var ContractDeploymentInterval = 200
 
-// FundChainlinkNodes will fund all of the provided Chainlink nodes with a set amount of native currency
+// FundChainlinkNodes will fund all of the provided Chainlink nodes with a set amountCreateOCRv2Jobs of native currency
+// Deprecated: we are moving away from blockchain.EVMClient, use actions_seth.FundChainlinkNodes
 func FundChainlinkNodes(
-	nodes []*client.Chainlink,
+	nodes []*client.ChainlinkK8sClient,
 	client blockchain.EVMClient,
 	amount *big.Float,
 ) error {
@@ -41,7 +59,13 @@ func FundChainlinkNodes(
 		if err != nil {
 			return err
 		}
-		gasEstimates, err := client.EstimateGas(ethereum.CallMsg{})
+		recipient := common.HexToAddress(toAddress)
+		msg := ethereum.CallMsg{
+			From:  common.HexToAddress(client.GetDefaultWallet().Address()),
+			To:    &recipient,
+			Value: conversions.EtherToWei(amount),
+		}
+		gasEstimates, err := client.EstimateGas(msg)
 		if err != nil {
 			return err
 		}
@@ -55,7 +79,7 @@ func FundChainlinkNodes(
 
 // FundChainlinkNodesAddress will fund all of the provided Chainlink nodes address at given index with a set amount of native currency
 func FundChainlinkNodesAddress(
-	nodes []*client.Chainlink,
+	nodes []*client.ChainlinkK8sClient,
 	client blockchain.EVMClient,
 	amount *big.Float,
 	keyIndex int,
@@ -65,7 +89,10 @@ func FundChainlinkNodesAddress(
 		if err != nil {
 			return err
 		}
-		gasEstimates, err := client.EstimateGas(ethereum.CallMsg{})
+		toAddr := common.HexToAddress(toAddress[keyIndex])
+		gasEstimates, err := client.EstimateGas(ethereum.CallMsg{
+			To: &toAddr,
+		})
 		if err != nil {
 			return err
 		}
@@ -79,7 +106,7 @@ func FundChainlinkNodesAddress(
 
 // FundChainlinkNodesAddress will fund all of the provided Chainlink nodes addresses with a set amount of native currency
 func FundChainlinkNodesAddresses(
-	nodes []*client.Chainlink,
+	nodes []*client.ChainlinkClient,
 	client blockchain.EVMClient,
 	amount *big.Float,
 ) error {
@@ -89,7 +116,10 @@ func FundChainlinkNodesAddresses(
 			return err
 		}
 		for _, addr := range toAddress {
-			gasEstimates, err := client.EstimateGas(ethereum.CallMsg{})
+			toAddr := common.HexToAddress(addr)
+			gasEstimates, err := client.EstimateGas(ethereum.CallMsg{
+				To: &toAddr,
+			})
 			if err != nil {
 				return err
 			}
@@ -104,7 +134,7 @@ func FundChainlinkNodesAddresses(
 
 // FundChainlinkNodes will fund all of the provided Chainlink nodes with a set amount of native currency
 func FundChainlinkNodesLink(
-	nodes []*client.Chainlink,
+	nodes []*client.ChainlinkK8sClient,
 	blockchain blockchain.EVMClient,
 	linkToken contracts.LinkToken,
 	linkAmount *big.Int,
@@ -123,7 +153,7 @@ func FundChainlinkNodesLink(
 }
 
 // ChainlinkNodeAddresses will return all the on-chain wallet addresses for a set of Chainlink nodes
-func ChainlinkNodeAddresses(nodes []*client.Chainlink) ([]common.Address, error) {
+func ChainlinkNodeAddresses(nodes []*client.ChainlinkK8sClient) ([]common.Address, error) {
 	addresses := make([]common.Address, 0)
 	for _, node := range nodes {
 		primaryAddress, err := node.PrimaryEthAddress()
@@ -136,7 +166,7 @@ func ChainlinkNodeAddresses(nodes []*client.Chainlink) ([]common.Address, error)
 }
 
 // ChainlinkNodeAddressesAtIndex will return all the on-chain wallet addresses for a set of Chainlink nodes
-func ChainlinkNodeAddressesAtIndex(nodes []*client.Chainlink, keyIndex int) ([]common.Address, error) {
+func ChainlinkNodeAddressesAtIndex(nodes []*client.ChainlinkK8sClient, keyIndex int) ([]common.Address, error) {
 	addresses := make([]common.Address, 0)
 	for _, node := range nodes {
 		nodeAddresses, err := node.EthAddresses()
@@ -149,7 +179,7 @@ func ChainlinkNodeAddressesAtIndex(nodes []*client.Chainlink, keyIndex int) ([]c
 }
 
 // SetChainlinkAPIPageSize specifies the page size from the Chainlink API, useful for high volume testing
-func SetChainlinkAPIPageSize(nodes []*client.Chainlink, pageSize int) {
+func SetChainlinkAPIPageSize(nodes []*client.ChainlinkK8sClient, pageSize int) {
 	for _, n := range nodes {
 		n.SetPageSize(pageSize)
 	}
@@ -192,7 +222,7 @@ func EncodeOnChainVRFProvingKey(vrfKey client.VRFKey) ([2]*big.Int, error) {
 // GetMockserverInitializerDataForOTPE creates mocked weiwatchers data needed for otpe
 func GetMockserverInitializerDataForOTPE(
 	OCRInstances []contracts.OffchainAggregator,
-	chainlinkNodes []*client.Chainlink,
+	chainlinkNodes []*client.ChainlinkK8sClient,
 ) (interface{}, error) {
 	var contractsInfo []ctfClient.ContractInfoJSON
 
@@ -239,15 +269,15 @@ func GetMockserverInitializerDataForOTPE(
 func TeardownSuite(
 	t *testing.T,
 	env *environment.Environment,
-	logsFolderPath string,
-	chainlinkNodes []*client.Chainlink,
+	chainlinkNodes []*client.ChainlinkK8sClient,
 	optionalTestReporter testreporters.TestReporter, // Optionally pass in a test reporter to log further metrics
 	failingLogLevel zapcore.Level, // Examines logs after the test, and fails the test if any Chainlink logs are found at or above provided level
+	grafnaUrlProvider testreporters.GrafanaURLProvider,
 	clients ...blockchain.EVMClient,
 ) error {
-	l := utils.GetTestLogger(t)
-	if err := testreporters.WriteTeardownLogs(t, env, optionalTestReporter, failingLogLevel); err != nil {
-		return errors.Wrap(err, "Error dumping environment logs, leaving environment running for manual retrieval")
+	l := logging.GetTestLogger(t)
+	if err := testreporters.WriteTeardownLogs(t, env, optionalTestReporter, failingLogLevel, grafnaUrlProvider); err != nil {
+		return fmt.Errorf("Error dumping environment logs, leaving environment running for manual retrieval, err: %w", err)
 	}
 	// Delete all jobs to stop depleting the funds
 	err := DeleteAllJobs(chainlinkNodes)
@@ -257,7 +287,7 @@ func TeardownSuite(
 
 	for _, c := range clients {
 		if c != nil && chainlinkNodes != nil && len(chainlinkNodes) > 0 {
-			if err := returnFunds(chainlinkNodes, c); err != nil {
+			if err := ReturnFunds(chainlinkNodes, c); err != nil {
 				// This printed line is required for tests that use real funds to propagate the failure
 				// out to the system running the test. Do not remove
 				fmt.Println(environment.FAILED_FUND_RETURN)
@@ -282,16 +312,18 @@ func TeardownSuite(
 
 // TeardownRemoteSuite is used when running a test within a remote-test-runner, like for long-running performance and
 // soak tests
+// Deprecated: we are moving away from blockchain.EVMClient, use actions_seth.TeardownRemoteSuite
 func TeardownRemoteSuite(
 	t *testing.T,
-	env *environment.Environment,
-	chainlinkNodes []*client.Chainlink,
+	namespace string,
+	chainlinkNodes []*client.ChainlinkK8sClient,
 	optionalTestReporter testreporters.TestReporter, // Optionally pass in a test reporter to log further metrics
+	grafnaUrlProvider testreporters.GrafanaURLProvider,
 	client blockchain.EVMClient,
 ) error {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	var err error
-	if err = testreporters.SendReport(t, env, "./", optionalTestReporter); err != nil {
+	if err = testreporters.SendReport(t, namespace, "./", optionalTestReporter, grafnaUrlProvider); err != nil {
 		l.Warn().Err(err).Msg("Error writing test report")
 	}
 	// Delete all jobs to stop depleting the funds
@@ -300,38 +332,43 @@ func TeardownRemoteSuite(
 		l.Warn().Msgf("Error deleting jobs %+v", err)
 	}
 
-	if err = returnFunds(chainlinkNodes, client); err != nil {
-		l.Error().Err(err).Str("Namespace", env.Cfg.Namespace).
+	if err = ReturnFunds(chainlinkNodes, client); err != nil {
+		l.Error().Err(err).Str("Namespace", namespace).
 			Msg("Error attempting to return funds from chainlink nodes to network's default wallet. " +
 				"Environment is left running so you can try manually!")
 	}
 	return err
 }
 
-func DeleteAllJobs(chainlinkNodes []*client.Chainlink) error {
+func DeleteAllJobs(chainlinkNodes []*client.ChainlinkK8sClient) error {
 	for _, node := range chainlinkNodes {
+		if node == nil {
+			return fmt.Errorf("found a nil chainlink node in the list of chainlink nodes while tearing down: %v", chainlinkNodes)
+		}
 		jobs, _, err := node.ReadJobs()
 		if err != nil {
-			return errors.Wrap(err, "error reading jobs from chainlink node")
+			return fmt.Errorf("error reading jobs from chainlink node, err: %w", err)
 		}
 		for _, maps := range jobs.Data {
 			if _, ok := maps["id"]; !ok {
-				return errors.Errorf("error reading job id from chainlink node's jobs %+v", jobs.Data)
+				return fmt.Errorf("error reading job id from chainlink node's jobs %+v", jobs.Data)
 			}
 			id := maps["id"].(string)
 			_, err := node.DeleteJob(id)
 			if err != nil {
-				return errors.Wrap(err, "error deleting job from chainlink node")
+				return fmt.Errorf("error deleting job from chainlink node, err: %w", err)
 			}
 		}
 	}
 	return nil
 }
 
-// Returns all the funds from the chainlink nodes to the networks default address
-func returnFunds(chainlinkNodes []*client.Chainlink, blockchainClient blockchain.EVMClient) error {
+// ReturnFunds attempts to return all the funds from the chainlink nodes and other wallets to the network's default wallet,
+// which will always be the first wallet in the list of wallets. If errors are encountered, it will keep trying other wallets
+// and return all errors encountered.
+func ReturnFunds(chainlinkNodes []*client.ChainlinkK8sClient, blockchainClient blockchain.EVMClient) error {
 	if blockchainClient == nil {
-		log.Warn().Msg("No blockchain client found, unable to return funds from chainlink nodes.")
+		return fmt.Errorf("blockchain client is nil, unable to return funds from chainlink nodes")
 	}
 	log.Info().Msg("Attempting to return Chainlink node funds to default network wallets")
 	if blockchainClient.NetworkSimulated() {
@@ -340,35 +377,76 @@ func returnFunds(chainlinkNodes []*client.Chainlink, blockchainClient blockchain
 		return nil
 	}
 
+	// If we fail to return funds from some addresses, we still want to try to return funds from the rest
+	encounteredErrors := []error{}
+
+	if len(blockchainClient.GetWallets()) > 1 {
+		if err := blockchainClient.SetDefaultWallet(0); err != nil {
+			encounteredErrors = append(encounteredErrors, err)
+		} else {
+			for walletIndex := 1; walletIndex < len(blockchainClient.GetWallets()); walletIndex++ {
+				decodedKey, err := hex.DecodeString(blockchainClient.GetWallets()[walletIndex].PrivateKey())
+				if err != nil {
+					encounteredErrors = append(encounteredErrors, err)
+					continue
+				}
+				privKey, err := crypto.ToECDSA(decodedKey)
+				if err != nil {
+					encounteredErrors = append(encounteredErrors, err)
+					continue
+				}
+
+				err = blockchainClient.ReturnFunds(privKey)
+				if err != nil {
+					encounteredErrors = append(encounteredErrors, err)
+					continue
+				}
+			}
+		}
+	}
+
 	for _, chainlinkNode := range chainlinkNodes {
 		fundedKeys, err := chainlinkNode.ExportEVMKeysForChain(blockchainClient.GetChainID().String())
 		if err != nil {
-			return err
+			encounteredErrors = append(encounteredErrors, err)
+			continue
 		}
 		for _, key := range fundedKeys {
 			keyToDecrypt, err := json.Marshal(key)
 			if err != nil {
-				return err
+				encounteredErrors = append(encounteredErrors, err)
+				continue
 			}
 			// This can take up a good bit of RAM and time. When running on the remote-test-runner, this can lead to OOM
 			// issues. So we avoid running in parallel; slower, but safer.
 			decryptedKey, err := keystore.DecryptKey(keyToDecrypt, client.ChainlinkKeyPassword)
 			if err != nil {
-				return err
+				encounteredErrors = append(encounteredErrors, err)
+				continue
 			}
 			err = blockchainClient.ReturnFunds(decryptedKey.PrivateKey)
 			if err != nil {
-				return err
+				encounteredErrors = append(encounteredErrors, fmt.Errorf("error returning funds from chainlink node: %w", err))
+				continue
 			}
 		}
 	}
-	return blockchainClient.WaitForEvents()
+	if err := blockchainClient.WaitForEvents(); err != nil {
+		encounteredErrors = append(encounteredErrors, err)
+	}
+	if len(encounteredErrors) > 0 {
+		return fmt.Errorf("encountered errors while returning funds: %v", encounteredErrors)
+	}
+	return nil
 }
 
 // FundAddresses will fund a list of addresses with an amount of native currency
 func FundAddresses(blockchain blockchain.EVMClient, amount *big.Float, addresses ...string) error {
 	for _, address := range addresses {
-		gasEstimates, err := blockchain.EstimateGas(ethereum.CallMsg{})
+		toAddr := common.HexToAddress(address)
+		gasEstimates, err := blockchain.EstimateGas(ethereum.CallMsg{
+			To: &toAddr,
+		})
 		if err != nil {
 			return err
 		}
@@ -391,10 +469,10 @@ func EncodeOnChainExternalJobID(jobID uuid.UUID) [32]byte {
 func UpgradeChainlinkNodeVersions(
 	testEnvironment *environment.Environment,
 	newImage, newVersion string,
-	nodes ...*client.Chainlink,
+	nodes ...*client.ChainlinkK8sClient,
 ) error {
-	if newImage == "" && newVersion == "" {
-		return errors.New("unable to upgrade node version, found empty image and version, must provide either a new image or a new version")
+	if newImage == "" || newVersion == "" {
+		return errors.New("New image and new version is needed to upgrade the node")
 	}
 	for _, node := range nodes {
 		if err := node.UpgradeVersion(testEnvironment, newImage, newVersion); err != nil {
@@ -406,4 +484,204 @@ func UpgradeChainlinkNodeVersions(
 		return err
 	}
 	return client.ReconnectChainlinkNodes(testEnvironment, nodes)
+}
+
+func DeployLINKToken(cd contracts.ContractDeployer) (contracts.LinkToken, error) {
+	linkToken, err := cd.DeployLinkTokenContract()
+	if err != nil {
+		return nil, err
+	}
+	return linkToken, err
+}
+
+func DeployMockETHLinkFeed(cd contracts.ContractDeployer, answer *big.Int) (contracts.MockETHLINKFeed, error) {
+	mockETHLINKFeed, err := cd.DeployMockETHLINKFeed(answer)
+	if err != nil {
+		return nil, err
+	}
+	return mockETHLINKFeed, err
+}
+
+// todo - move to CTF
+func GenerateWallet() (common.Address, error) {
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		return common.Address{}, err
+	}
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return common.Address{}, fmt.Errorf("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+	}
+	return crypto.PubkeyToAddress(*publicKeyECDSA), nil
+}
+
+// todo - move to CTF
+func GetTxFromAddress(tx *types.Transaction) (string, error) {
+	from, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
+	return from.String(), err
+}
+
+// todo - move to CTF
+func DecodeTxInputData(abiString string, data []byte) (map[string]interface{}, error) {
+	jsonABI, err := abi.JSON(strings.NewReader(abiString))
+	if err != nil {
+		return nil, err
+	}
+	methodSigData := data[:4]
+	inputsSigData := data[4:]
+	method, err := jsonABI.MethodById(methodSigData)
+	if err != nil {
+		return nil, err
+	}
+	inputsMap := make(map[string]interface{})
+	if err := method.Inputs.UnpackIntoMap(inputsMap, inputsSigData); err != nil {
+		return nil, err
+	}
+	return inputsMap, nil
+}
+
+// todo - move to CTF
+func WaitForBlockNumberToBe(
+	waitForBlockNumberToBe uint64,
+	client *seth.Client,
+	wg *sync.WaitGroup,
+	timeout time.Duration,
+	t testing.TB,
+	l zerolog.Logger,
+) (uint64, error) {
+	blockNumberChannel := make(chan uint64)
+	errorChannel := make(chan error)
+	testContext, testCancel := context.WithTimeout(context.Background(), timeout)
+	defer testCancel()
+	ticker := time.NewTicker(time.Second * 5)
+	var latestBlockNumber uint64
+	for {
+		select {
+		case <-testContext.Done():
+			ticker.Stop()
+			wg.Done()
+			return latestBlockNumber,
+				fmt.Errorf("timeout waiting for Block Number to be: %d. Last recorded block number was: %d",
+					waitForBlockNumberToBe, latestBlockNumber)
+		case <-ticker.C:
+			go func() {
+				currentBlockNumber, err := client.Client.BlockNumber(testcontext.Get(t))
+				if err != nil {
+					errorChannel <- err
+				}
+				l.Info().
+					Uint64("Latest Block Number", currentBlockNumber).
+					Uint64("Desired Block Number", waitForBlockNumberToBe).
+					Msg("Waiting for Block Number to be")
+				blockNumberChannel <- currentBlockNumber
+			}()
+		case latestBlockNumber = <-blockNumberChannel:
+			if latestBlockNumber >= waitForBlockNumberToBe {
+				ticker.Stop()
+				wg.Done()
+				l.Info().
+					Uint64("Latest Block Number", latestBlockNumber).
+					Uint64("Desired Block Number", waitForBlockNumberToBe).
+					Msg("Desired Block Number reached!")
+				return latestBlockNumber, nil
+			}
+		case err := <-errorChannel:
+			ticker.Stop()
+			wg.Done()
+			return 0, err
+		}
+	}
+}
+
+// todo - move to EVMClient
+func RewindSimulatedChainToBlockNumber(
+	ctx context.Context,
+	client *seth.Client,
+	rpcURL string,
+	rewindChainToBlockNumber uint64,
+	l zerolog.Logger,
+) (uint64, error) {
+	latestBlockNumberBeforeReorg, err := client.Client.BlockNumber(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("error getting latest block number: %w", err)
+	}
+
+	l.Info().
+		Str("RPC URL", rpcURL).
+		Uint64("Latest Block Number before Reorg", latestBlockNumberBeforeReorg).
+		Uint64("Rewind Chain to Block Number", rewindChainToBlockNumber).
+		Msg("Performing Reorg on chain by rewinding chain to specific block number")
+
+	_, err = NewRPCRawClient(rpcURL).SetHeadForSimulatedChain(rewindChainToBlockNumber)
+
+	if err != nil {
+		return 0, fmt.Errorf("error making reorg: %w", err)
+	}
+
+	latestBlockNumberAfterReorg, err := client.Client.BlockNumber(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("error getting latest block number: %w", err)
+	}
+
+	l.Info().
+		Uint64("Block Number", latestBlockNumberAfterReorg).
+		Msg("Latest Block Number after Reorg")
+	return latestBlockNumberAfterReorg, nil
+}
+
+func GetRPCUrl(env *test_env.CLClusterTestEnv, chainID int64) (string, error) {
+	provider, err := env.GetRpcProvider(chainID)
+	if err != nil {
+		return "", err
+	}
+	return provider.PublicHttpUrls()[0], nil
+}
+
+// RPCRawClient
+// created separate client since method evmClient.RawJsonRPCCall fails on "invalid argument 0: json: cannot unmarshal non-string into Go value of type hexutil.Uint64"
+type RPCRawClient struct {
+	resty *resty.Client
+}
+
+func NewRPCRawClient(url string) *RPCRawClient {
+	isDebug := os.Getenv("DEBUG_RESTY") == "true"
+	restyClient := resty.New().SetDebug(isDebug).SetBaseURL(url)
+	return &RPCRawClient{
+		resty: restyClient,
+	}
+}
+
+func (g *RPCRawClient) SetHeadForSimulatedChain(setHeadToBlockNumber uint64) (JsonRPCResponse, error) {
+	var responseObject JsonRPCResponse
+	postBody, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "debug_setHead",
+		"params":  []string{hexutil.EncodeUint64(setHeadToBlockNumber)},
+	})
+	resp, err := g.resty.R().
+		SetHeader("Content-Type", "application/json").
+		SetBody(postBody).
+		SetResult(&responseObject).
+		Post("")
+
+	if err != nil {
+		return JsonRPCResponse{}, fmt.Errorf("error making API request: %w", err)
+	}
+	statusCode := resp.StatusCode()
+	if statusCode != 200 && statusCode != 201 {
+		return JsonRPCResponse{}, fmt.Errorf("error invoking debug_setHead method, received unexpected status code %d: %s", statusCode, resp.String())
+	}
+	if responseObject.Error != "" {
+		return JsonRPCResponse{}, fmt.Errorf("received non-empty error field: %v", responseObject.Error)
+	}
+	return responseObject, nil
+}
+
+type JsonRPCResponse struct {
+	Version string `json:"jsonrpc"`
+	Id      int    `json:"id"`
+	Result  string `json:"result,omitempty"`
+	Error   string `json:"error,omitempty"`
 }

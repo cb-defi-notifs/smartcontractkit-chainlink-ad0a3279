@@ -5,14 +5,19 @@ import (
 	"errors"
 	"sync/atomic"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/services"
+
 	"github.com/gorilla/websocket"
+
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 )
 
 // WSConnectionWrapper is a websocket connection abstraction that supports re-connects.
 // I/O is separated from connection management:
 //   - component doing writes can use the thread-safe Write() method
 //   - component doing reads can listen on the ReadChannel()
-//   - component managing connections can listen to connection-closed channels and call Restart()
+//   - component managing connections can listen to connection-closed channels and call Reset()
 //     to swap the underlying connection object
 //
 // The Wrapper can be used by a server expecting long-lived connections from a given client,
@@ -23,25 +28,34 @@ import (
 // The concept of "pumps" is borrowed from https://github.com/smartcontractkit/wsrpc
 // All methods are thread-safe.
 type WSConnectionWrapper interface {
+	job.ServiceCtx
+	services.HealthReporter
+
 	// Update underlying connection object. Return a channel that gets an error on connection close.
 	// Cannot be called after Close().
-	Restart(newConn *websocket.Conn) <-chan error
+	Reset(newConn *websocket.Conn) <-chan error
 
 	Write(ctx context.Context, msgType int, data []byte) error
 
 	ReadChannel() <-chan ReadItem
-
-	Close()
 }
 
 type wsConnectionWrapper struct {
+	services.StateMachine
+	lggr logger.Logger
+
 	conn atomic.Pointer[websocket.Conn]
 
 	writeCh    chan writeItem
 	readCh     chan ReadItem
 	shutdownCh chan struct{}
-	shutdown   atomic.Bool
 }
+
+func (c *wsConnectionWrapper) HealthReport() map[string]error {
+	return map[string]error{c.Name(): c.Healthy()}
+}
+
+func (c *wsConnectionWrapper) Name() string { return c.lggr.Name() }
 
 type ReadItem struct {
 	MsgType int
@@ -61,22 +75,29 @@ var (
 	ErrWrapperShutdown    = errors.New("wrapper shutting down")
 )
 
-func NewWSConnectionWrapper() WSConnectionWrapper {
+func NewWSConnectionWrapper(lggr logger.Logger) WSConnectionWrapper {
 	cw := &wsConnectionWrapper{
+		lggr:       lggr.Named("WSConnectionWrapper"),
 		writeCh:    make(chan writeItem),
 		readCh:     make(chan ReadItem),
 		shutdownCh: make(chan struct{}),
 	}
-	// write pump runs until Shutdown() is called
-	go cw.writePump()
 	return cw
 }
 
-// Restart
+func (c *wsConnectionWrapper) Start(_ context.Context) error {
+	return c.StartOnce("WSConnectionWrapper", func() error {
+		// write pump runs until Shutdown() is called
+		go c.writePump()
+		return nil
+	})
+}
+
+// Reset:
 //  1. replaces the underlying connection and shuts the old one down
 //  2. starts a new read goroutine that pushes received messages to readCh
 //  3. returns channel that closes when connection closes
-func (c *wsConnectionWrapper) Restart(newConn *websocket.Conn) <-chan error {
+func (c *wsConnectionWrapper) Reset(newConn *websocket.Conn) <-chan error {
 	oldConn := c.conn.Swap(newConn)
 
 	if oldConn != nil {
@@ -117,12 +138,12 @@ func (c *wsConnectionWrapper) ReadChannel() <-chan ReadItem {
 	return c.readCh
 }
 
-func (c *wsConnectionWrapper) Close() {
-	if alreadyShutDown := c.shutdown.Swap(true); alreadyShutDown {
-		return
-	}
-	close(c.shutdownCh)
-	c.Restart(nil)
+func (c *wsConnectionWrapper) Close() error {
+	return c.StopOnce("WSConnectionWrapper", func() error {
+		close(c.shutdownCh)
+		c.Reset(nil)
+		return nil
+	})
 }
 
 func (c *wsConnectionWrapper) writePump() {

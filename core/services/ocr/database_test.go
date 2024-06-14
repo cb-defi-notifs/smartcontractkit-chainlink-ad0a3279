@@ -7,25 +7,24 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/smartcontractkit/libocr/gethwrappers/offchainaggregator"
-	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/libocr/gethwrappers/offchainaggregator"
+	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting/types"
+
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	configtest "github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 func Test_DB_ReadWriteState(t *testing.T) {
 	db := pgtest.NewSqlxDB(t)
 
 	configDigest := cltest.MakeConfigDigest(t)
-	cfg := configtest.NewTestGeneralConfig(t)
-	ethKeyStore := cltest.NewKeyStore(t, db, cfg.Database()).Eth()
+	ethKeyStore := cltest.NewKeyStore(t, db).Eth()
 	key, _ := cltest.MustInsertRandomKey(t, ethKeyStore)
 	spec := cltest.MustInsertOffchainreportingOracleSpec(t, db, key.EIP55Address)
 
@@ -105,7 +104,6 @@ func Test_DB_ReadWriteState(t *testing.T) {
 func Test_DB_ReadWriteConfig(t *testing.T) {
 	db := pgtest.NewSqlxDB(t)
 	sqlDB := db
-	cfg := configtest.NewTestGeneralConfig(t)
 
 	config := ocrtypes.ContractConfig{
 		ConfigDigest:         cltest.MakeConfigDigest(t),
@@ -115,7 +113,7 @@ func Test_DB_ReadWriteConfig(t *testing.T) {
 		EncodedConfigVersion: uint64(987654),
 		Encoded:              []byte{1, 2, 3, 4, 5},
 	}
-	ethKeyStore := cltest.NewKeyStore(t, db, cfg.Database()).Eth()
+	ethKeyStore := cltest.NewKeyStore(t, db).Eth()
 	key, _ := cltest.MustInsertRandomKey(t, ethKeyStore)
 	spec := cltest.MustInsertOffchainreportingOracleSpec(t, db, key.EIP55Address)
 	transmitterAddress := key.Address
@@ -187,8 +185,7 @@ func assertPendingTransmissionEqual(t *testing.T, pt1, pt2 ocrtypes.PendingTrans
 func Test_DB_PendingTransmissions(t *testing.T) {
 	db := pgtest.NewSqlxDB(t)
 	sqlDB := db
-	cfg := configtest.NewTestGeneralConfig(t)
-	ethKeyStore := cltest.NewKeyStore(t, db, cfg.Database()).Eth()
+	ethKeyStore := cltest.NewKeyStore(t, db).Eth()
 	key, _ := cltest.MustInsertRandomKey(t, ethKeyStore)
 
 	spec := cltest.MustInsertOffchainreportingOracleSpec(t, db, key.EIP55Address)
@@ -409,7 +406,8 @@ func Test_DB_LatestRoundRequested(t *testing.T) {
 	}
 
 	t.Run("saves latest round requested", func(t *testing.T) {
-		err := odb.SaveLatestRoundRequested(sqlDB, rr)
+		ctx := testutils.Context(t)
+		err := odb.SaveLatestRoundRequested(ctx, rr)
 		require.NoError(t, err)
 
 		rawLog.Index = 42
@@ -423,17 +421,18 @@ func Test_DB_LatestRoundRequested(t *testing.T) {
 			Raw:          rawLog,
 		}
 
-		err = odb.SaveLatestRoundRequested(sqlDB, rr)
+		err = odb.SaveLatestRoundRequested(ctx, rr)
 		require.NoError(t, err)
 	})
 
 	t.Run("loads latest round requested", func(t *testing.T) {
+		ctx := testutils.Context(t)
 		// There is no round for db2
-		lrr, err := odb2.LoadLatestRoundRequested()
+		lrr, err := odb2.LoadLatestRoundRequested(ctx)
 		require.NoError(t, err)
 		require.Equal(t, 0, int(lrr.Epoch))
 
-		lrr, err = odb.LoadLatestRoundRequested()
+		lrr, err = odb.LoadLatestRoundRequested(ctx)
 		require.NoError(t, err)
 
 		assert.Equal(t, rr, lrr)

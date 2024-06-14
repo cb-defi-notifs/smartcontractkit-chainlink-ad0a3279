@@ -3,11 +3,11 @@ package txmgr
 import (
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
+	gethcommon "github.com/ethereum/go-ethereum/common"
 
 	txmgrtypes "github.com/smartcontractkit/chainlink/v2/common/txmgr/types"
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
-	coreconfig "github.com/smartcontractkit/chainlink/v2/core/config"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/chaintype"
 )
 
 // ChainConfig encompasses config used by txmgr package
@@ -15,11 +15,11 @@ import (
 //
 //go:generate mockery --quiet --recursive --name ChainConfig --output ./mocks/ --case=underscore --structname Config --filename config.go
 type ChainConfig interface {
-	ChainType() coreconfig.ChainType
+	ChainType() chaintype.ChainType
 	FinalityDepth() uint32
+	FinalityTagEnabled() bool
 	NonceAutoSync() bool
 	RPCDefaultBatchSize() uint32
-	KeySpecificMaxGasPriceWei(addr common.Address) *assets.Wei
 }
 
 type FeeConfig interface {
@@ -27,11 +27,12 @@ type FeeConfig interface {
 	BumpPercent() uint16
 	BumpThreshold() uint64
 	BumpTxDepth() uint32
-	LimitDefault() uint32
+	LimitDefault() uint64
 	PriceDefault() *assets.Wei
 	TipCapMin() *assets.Wei
 	PriceMax() *assets.Wei
 	PriceMin() *assets.Wei
+	PriceMaxKey(gethcommon.Address) *assets.Wei
 }
 
 type DatabaseConfig interface {

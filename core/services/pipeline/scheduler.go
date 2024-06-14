@@ -33,7 +33,7 @@ func (s *scheduler) newMemoryTaskRun(task Task, vars Vars) *memoryTaskRun {
 		// if we're confident that indices are within range
 		for _, i := range task.Inputs() {
 			if i.PropagateResult {
-				inputs = append(inputs, input{index: int32(i.InputTask.OutputIndex()), result: s.results[i.InputTask.ID()].Result})
+				inputs = append(inputs, input{index: i.InputTask.OutputIndex(), result: s.results[i.InputTask.ID()].Result})
 			}
 		}
 		sort.Slice(inputs, func(i, j int) bool {
@@ -170,7 +170,7 @@ func (s *scheduler) Run() {
 		result := <-s.resultCh
 		// TODO: if for some reason the cleanup didn't succeed and we're stuck waiting for reports forever
 		// we should be able to timeout and finish shutting down
-		// See: https://app.shortcut.com/chainlinklabs/story/21225/straighten-out-and-clarify-context-usage-in-the-pipeline
+		// See: https://smartcontract-it.atlassian.net/browse/BCF-994
 
 		s.waiting--
 
@@ -269,7 +269,6 @@ func (s *scheduler) Run() {
 				s.waiting++
 			}
 		}
-
 	}
 
 	close(s.taskCh)

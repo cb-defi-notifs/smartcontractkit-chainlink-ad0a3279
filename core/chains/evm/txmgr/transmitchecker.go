@@ -9,7 +9,11 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	bigmath "github.com/smartcontractkit/chainlink-common/pkg/utils/big_math"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/bytes"
 
 	"github.com/smartcontractkit/chainlink/v2/common/txmgr"
 	txmgrtypes "github.com/smartcontractkit/chainlink/v2/common/txmgr/types"
@@ -19,9 +23,7 @@ import (
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	v1 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/solidity_vrf_coordinator_interface"
 	v2 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
-	bigmath "github.com/smartcontractkit/chainlink/v2/core/utils/big_math"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/vrf_coordinator_v2plus_interface"
 )
 
 type (
@@ -51,11 +53,11 @@ func (c *CheckerFactory) BuildChecker(spec TransmitCheckerSpec) (TransmitChecker
 		return &SimulateChecker{c.Client}, nil
 	case TransmitCheckerTypeVRFV1:
 		if spec.VRFCoordinatorAddress == nil {
-			return nil, errors.Errorf("malformed checker, expected non-nil VRFCoordinatorAddress, got: %v", spec)
+			return nil, pkgerrors.Errorf("malformed checker, expected non-nil VRFCoordinatorAddress, got: %v", spec)
 		}
 		coord, err := v1.NewVRFCoordinator(*spec.VRFCoordinatorAddress, c.Client)
 		if err != nil {
-			return nil, errors.Wrapf(err,
+			return nil, pkgerrors.Wrapf(err,
 				"failed to create VRF V1 coordinator at address %v", spec.VRFCoordinatorAddress)
 		}
 		return &VRFV1Checker{
@@ -64,25 +66,42 @@ func (c *CheckerFactory) BuildChecker(spec TransmitCheckerSpec) (TransmitChecker
 		}, nil
 	case TransmitCheckerTypeVRFV2:
 		if spec.VRFCoordinatorAddress == nil {
-			return nil, errors.Errorf("malformed checker, expected non-nil VRFCoordinatorAddress, got: %v", spec)
+			return nil, pkgerrors.Errorf("malformed checker, expected non-nil VRFCoordinatorAddress, got: %v", spec)
 		}
 		coord, err := v2.NewVRFCoordinatorV2(*spec.VRFCoordinatorAddress, c.Client)
 		if err != nil {
-			return nil, errors.Wrapf(err,
+			return nil, pkgerrors.Wrapf(err,
 				"failed to create VRF V2 coordinator at address %v", spec.VRFCoordinatorAddress)
 		}
 		if spec.VRFRequestBlockNumber == nil {
-			return nil, errors.New("VRFRequestBlockNumber parameter must be non-nil")
+			return nil, pkgerrors.New("VRFRequestBlockNumber parameter must be non-nil")
 		}
 		return &VRFV2Checker{
 			GetCommitment:      coord.GetCommitment,
 			HeadByNumber:       c.Client.HeadByNumber,
 			RequestBlockNumber: spec.VRFRequestBlockNumber,
 		}, nil
+	case TransmitCheckerTypeVRFV2Plus:
+		if spec.VRFCoordinatorAddress == nil {
+			return nil, pkgerrors.Errorf("malformed checker, expected non-nil VRFCoordinatorAddress, got: %v", spec)
+		}
+		coord, err := vrf_coordinator_v2plus_interface.NewIVRFCoordinatorV2PlusInternal(*spec.VRFCoordinatorAddress, c.Client)
+		if err != nil {
+			return nil, pkgerrors.Wrapf(err,
+				"failed to create VRF V2 coordinator plus at address %v", spec.VRFCoordinatorAddress)
+		}
+		if spec.VRFRequestBlockNumber == nil {
+			return nil, pkgerrors.New("VRFRequestBlockNumber parameter must be non-nil")
+		}
+		return &VRFV2Checker{
+			GetCommitment:      coord.SRequestCommitments,
+			HeadByNumber:       c.Client.HeadByNumber,
+			RequestBlockNumber: spec.VRFRequestBlockNumber,
+		}, nil
 	case "":
 		return NoChecker, nil
 	default:
-		return nil, errors.Errorf("unrecognized checker type: %s", spec.CheckerType)
+		return nil, pkgerrors.Errorf("unrecognized checker type: %s", spec.CheckerType)
 	}
 }
 
@@ -91,7 +110,7 @@ type noChecker struct{}
 // Check satisfies the TransmitChecker interface.
 func (noChecker) Check(
 	_ context.Context,
-	_ logger.Logger,
+	_ logger.SugaredLogger,
 	_ Tx,
 	_ TxAttempt,
 ) error {
@@ -106,7 +125,7 @@ type SimulateChecker struct {
 // Check satisfies the TransmitChecker interface.
 func (s *SimulateChecker) Check(
 	ctx context.Context,
-	l logger.Logger,
+	l logger.SugaredLogger,
 	tx Tx,
 	a TxAttempt,
 ) error {
@@ -131,7 +150,7 @@ func (s *SimulateChecker) Check(
 		if jErr := evmclient.ExtractRPCErrorOrNil(err); jErr != nil {
 			l.Criticalw("Transaction reverted during simulation",
 				"ethTxAttemptID", a.ID, "txHash", a.Hash, "err", err, "rpcErr", jErr.String(), "returnValue", b.String())
-			return errors.Errorf("transaction reverted during simulation: %s", jErr.String())
+			return pkgerrors.Errorf("transaction reverted during simulation: %s", jErr.String())
 		}
 		l.Warnw("Transaction simulation failed, will attempt to send anyway",
 			"ethTxAttemptID", a.ID, "txHash", a.Hash, "err", err, "returnValue", b.String())
@@ -156,7 +175,7 @@ type VRFV1Checker struct {
 // Check satisfies the TransmitChecker interface.
 func (v *VRFV1Checker) Check(
 	ctx context.Context,
-	l logger.Logger,
+	l logger.SugaredLogger,
 	tx Tx,
 	_ TxAttempt,
 ) error {
@@ -199,7 +218,7 @@ func (v *VRFV1Checker) Check(
 	requestTransactionReceipt := &gethtypes.Receipt{}
 	batch := []rpc.BatchElem{{
 		Method: "eth_getBlockByNumber",
-		Args:   []interface{}{nil},
+		Args:   []interface{}{"latest", false},
 		Result: mostRecentHead,
 	}, {
 		Method: "eth_getTransactionReceipt",
@@ -233,18 +252,17 @@ func (v *VRFV1Checker) Check(
 			"meta", tx.Meta,
 			"reqID", reqID)
 		return nil
-	} else if utils.IsEmpty(callback.SeedAndBlockNum[:]) {
+	} else if bytes.IsEmpty(callback.SeedAndBlockNum[:]) {
 		// Request already fulfilled
 		l.Infow("Request already fulfilled",
 			"err", err,
 			"ethTxID", tx.ID,
 			"meta", tx.Meta,
 			"reqID", reqID)
-		return errors.New("request already fulfilled")
-	} else {
-		// Request not fulfilled
-		return nil
+		return pkgerrors.New("request already fulfilled")
 	}
+	// Request not fulfilled
+	return nil
 }
 
 // VRFV2Checker is an implementation of TransmitChecker that checks whether a VRF V2 fulfillment
@@ -266,7 +284,7 @@ type VRFV2Checker struct {
 // Check satisfies the TransmitChecker interface.
 func (v *VRFV2Checker) Check(
 	ctx context.Context,
-	l logger.Logger,
+	l logger.SugaredLogger,
 	tx Tx,
 	_ TxAttempt,
 ) error {
@@ -326,18 +344,17 @@ func (v *VRFV2Checker) Check(
 			"blockNumber", h.Number,
 		)
 		return nil
-	} else if utils.IsEmpty(callback[:]) {
+	} else if bytes.IsEmpty(callback[:]) {
 		// If seedAndBlockNumber is zero then the response has been fulfilled and we should skip it.
 		l.Infow("Request already fulfilled.",
 			"ethTxID", tx.ID,
 			"meta", tx.Meta,
 			"vrfRequestId", vrfRequestID)
-		return errors.New("request already fulfilled")
-	} else {
-		l.Debugw("Request not yet fulfilled",
-			"ethTxID", tx.ID,
-			"meta", tx.Meta,
-			"vrfRequestId", vrfRequestID)
-		return nil
+		return pkgerrors.New("request already fulfilled")
 	}
+	l.Debugw("Request not yet fulfilled",
+		"ethTxID", tx.ID,
+		"meta", tx.Meta,
+		"vrfRequestId", vrfRequestID)
+	return nil
 }

@@ -11,12 +11,11 @@ import (
 func TestNewCache(t *testing.T) {
 	b := NewBlockCache[int](time.Second)
 
-	assert.Equal(t, time.Second, time.Duration(b.evictionWindow), "must set correct blockEvictionWindow")
+	assert.Equal(t, time.Second, b.evictionWindow, "must set correct blockEvictionWindow")
 }
 
 func TestCache(t *testing.T) {
 	t.Run("Happy path, no overwrites.", func(t *testing.T) {
-
 		now := time.Now().UTC()
 
 		tests := []struct {
@@ -30,7 +29,7 @@ func TestCache(t *testing.T) {
 			{Key: common.HexToHash("0x4"), Value: 5},
 		}
 
-		c := NewBlockCache[int](time.Second * 100)
+		c := NewBlockCache[int](100 * time.Second)
 
 		// Populate cache with ordered items.
 		for i, test := range tests {
@@ -65,7 +64,6 @@ func TestCache(t *testing.T) {
 	})
 
 	t.Run("Happy path, override middle item.", func(t *testing.T) {
-
 		now := time.Now().UTC()
 
 		tests := []struct {
@@ -79,7 +77,7 @@ func TestCache(t *testing.T) {
 			{Key: common.HexToHash("0x1"), Value: 5},
 		}
 
-		c := NewBlockCache[int](time.Duration(time.Second * 100))
+		c := NewBlockCache[int](100 * time.Second)
 
 		// Populate cache with items.
 		for i, test := range tests {
@@ -105,7 +103,6 @@ func TestCache(t *testing.T) {
 	})
 
 	t.Run("Happy path, override last item.", func(t *testing.T) {
-
 		now := time.Now().UTC()
 
 		tests := []struct {
@@ -119,7 +116,7 @@ func TestCache(t *testing.T) {
 			{Key: common.HexToHash("0x0"), Value: 5},
 		}
 
-		c := NewBlockCache[int](time.Duration(time.Second * 100))
+		c := NewBlockCache[int](100 * time.Second)
 
 		// Populate cache with items.
 		for i, test := range tests {

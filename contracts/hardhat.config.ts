@@ -1,13 +1,8 @@
-import '@nomiclabs/hardhat-ethers'
-import '@nomiclabs/hardhat-etherscan'
-import '@nomiclabs/hardhat-waffle'
-import '@openzeppelin/hardhat-upgrades'
+import '@nomicfoundation/hardhat-ethers'
+import '@nomicfoundation/hardhat-verify'
+import '@nomicfoundation/hardhat-chai-matchers'
 import '@typechain/hardhat'
 import 'hardhat-abi-exporter'
-import 'hardhat-contract-sizer'
-import 'hardhat-gas-reporter'
-import 'solidity-coverage'
-import 'hardhat-ignore-warnings'
 import { subtask } from 'hardhat/config'
 import { TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS } from 'hardhat/builtin-tasks/task-names'
 
@@ -25,7 +20,10 @@ const COMPILER_SETTINGS = {
 subtask(TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS).setAction(
   async (_, __, runSuper) => {
     const paths = await runSuper()
-    return paths.filter((p: string) => !p.endsWith('.t.sol'))
+    const noTests = paths.filter((p: string) => !p.endsWith('.t.sol'))
+    return noTests.filter(
+      (p: string) => !p.includes('src/v0.8/vendor/forge-std'),
+    )
   },
 )
 
@@ -35,6 +33,7 @@ subtask(TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS).setAction(
 let config = {
   abiExporter: {
     path: './abi',
+    runOnCompile: true,
   },
   paths: {
     artifacts: './artifacts',
@@ -54,36 +53,21 @@ let config = {
       allowUnlimitedContractSize: Boolean(
         process.env.ALLOW_UNLIMITED_CONTRACT_SIZE,
       ),
+      hardfork: 'merge',
     },
   },
   solidity: {
     compilers: [
       {
-        version: '0.4.24',
-        settings: COMPILER_SETTINGS,
-      },
-      {
-        version: '0.5.0',
-        settings: COMPILER_SETTINGS,
-      },
-      {
-        version: '0.6.6',
-        settings: COMPILER_SETTINGS,
-      },
-      {
-        version: '0.7.6',
-        settings: COMPILER_SETTINGS,
-      },
-      {
         version: '0.8.6',
         settings: COMPILER_SETTINGS,
       },
       {
-        version: '0.8.15',
+        version: '0.8.16',
         settings: COMPILER_SETTINGS,
       },
       {
-        version: '0.8.16',
+        version: '0.8.19',
         settings: COMPILER_SETTINGS,
       },
     ],
@@ -100,19 +84,23 @@ let config = {
           },
         },
       },
+      'src/v0.8/vrf/dev/VRFCoordinatorV2_5.sol': {
+        version: '0.8.19',
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 500, // see native_solc_compile_all_vrf
+          },
+          metadata: {
+            bytecodeHash: 'none',
+          },
+        },
+      },
     },
   },
-  contractSizer: {
-    alphaSort: true,
-    runOnCompile: false,
-    disambiguatePaths: false,
-  },
   mocha: {
-    timeout: 100000,
+    timeout: 150000,
     forbidOnly: Boolean(process.env.CI),
-  },
-  gasReporter: {
-    enabled: Boolean(process.env.REPORT_GAS),
   },
   warnings: !process.env.HIDE_WARNINGS,
 }

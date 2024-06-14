@@ -2,6 +2,7 @@ package loader
 
 import (
 	"database/sql"
+	"math/big"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,23 +11,24 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	relaytypes "github.com/smartcontractkit/chainlink-relay/pkg/types"
-
+	"github.com/smartcontractkit/chainlink-common/pkg/loop"
+	commontypes "github.com/smartcontractkit/chainlink-common/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/chains"
-	v2 "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/v2"
-	evmmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
 	evmtxmgrmocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr/mocks"
+	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+
+	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 	coremocks "github.com/smartcontractkit/chainlink/v2/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
-	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
+	chainlinkmocks "github.com/smartcontractkit/chainlink/v2/core/services/chainlink/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/feeds"
 	feedsMocks "github.com/smartcontractkit/chainlink/v2/core/services/feeds/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	jobORMMocks "github.com/smartcontractkit/chainlink/v2/core/services/job/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	testutils2 "github.com/smartcontractkit/chainlink/v2/core/web/testutils"
 )
 
 func TestLoader_Chains(t *testing.T) {
@@ -35,27 +37,39 @@ func TestLoader_Chains(t *testing.T) {
 	app := coremocks.NewApplication(t)
 	ctx := InjectDataloader(testutils.Context(t), app)
 
-	one := utils.NewBigI(1)
-	chain := v2.EVMConfig{ChainID: one, Chain: v2.Defaults(one)}
-	two := utils.NewBigI(2)
-	chain2 := v2.EVMConfig{ChainID: two, Chain: v2.Defaults(two)}
-	evmORM := evmtest.NewTestConfigs(&chain, &chain2)
-	app.On("EVMORM").Return(evmORM)
+	one := ubig.NewI(1)
+	chain := toml.EVMConfig{ChainID: one, Chain: toml.Defaults(one)}
+	two := ubig.NewI(2)
+	chain2 := toml.EVMConfig{ChainID: two, Chain: toml.Defaults(two)}
+	config1, err := chain.TOMLString()
+	require.NoError(t, err)
+	config2, err := chain2.TOMLString()
+	require.NoError(t, err)
+
+	app.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: []loop.Relayer{
+		testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
+			ID:      "1",
+			Enabled: true,
+			Config:  config1,
+		}}, testutils2.MockRelayer{ChainStatus: commontypes.ChainStatus{
+			ID:      "2",
+			Enabled: true,
+			Config:  config2,
+		}},
+	}})
 
 	batcher := chainBatcher{app}
-
 	keys := dataloader.NewKeysFromStrings([]string{"2", "1", "3"})
 	results := batcher.loadByIDs(ctx, keys)
 
 	assert.Len(t, results, 3)
-	config2, err := chain2.TOMLString()
+
 	require.NoError(t, err)
-	want2 := relaytypes.ChainStatus{ID: "2", Enabled: true, Config: config2}
-	assert.Equal(t, want2, results[0].Data.(relaytypes.ChainStatus))
-	config1, err := chain.TOMLString()
-	require.NoError(t, err)
-	want1 := relaytypes.ChainStatus{ID: "1", Enabled: true, Config: config1}
-	assert.Equal(t, want1, results[1].Data.(relaytypes.ChainStatus))
+	want2 := commontypes.ChainStatus{ID: "2", Enabled: true, Config: config2}
+	assert.Equal(t, want2, results[0].Data.(commontypes.ChainStatus))
+
+	want1 := commontypes.ChainStatus{ID: "1", Enabled: true, Config: config1}
+	assert.Equal(t, want1, results[1].Data.(commontypes.ChainStatus))
 	assert.Nil(t, results[2].Data)
 	assert.Error(t, results[2].Error)
 	assert.ErrorIs(t, results[2].Error, chains.ErrNotFound)
@@ -64,33 +78,31 @@ func TestLoader_Chains(t *testing.T) {
 func TestLoader_Nodes(t *testing.T) {
 	t.Parallel()
 
-	evmChainSet := evmmocks.NewChainSet(t)
 	app := coremocks.NewApplication(t)
 	ctx := InjectDataloader(testutils.Context(t), app)
 
-	node1 := relaytypes.NodeStatus{
-		Name:    "test-node-1",
-		ChainID: "1",
-	}
-	node2 := relaytypes.NodeStatus{
-		Name:    "test-node-1",
-		ChainID: "2",
-	}
+	chainID1, chainID2, notAnID := big.NewInt(1), big.NewInt(2), big.NewInt(3)
 
-	evmChainSet.On("NodeStatuses", mock.Anything, mock.Anything, mock.Anything, "2", "1", "3").Return([]relaytypes.NodeStatus{
-		node1, node2,
-	}, 2, nil)
-	app.On("GetChains").Return(chainlink.Chains{EVM: evmChainSet})
+	genNodeStat := func(id string) commontypes.NodeStatus {
+		return commontypes.NodeStatus{
+			Name:    "test-node-" + id,
+			ChainID: id,
+		}
+	}
+	rcInterops := &chainlinkmocks.FakeRelayerChainInteroperators{Nodes: []commontypes.NodeStatus{
+		genNodeStat(chainID2.String()), genNodeStat(chainID1.String()),
+	}}
 
+	app.On("GetRelayers").Return(rcInterops)
 	batcher := nodeBatcher{app}
 
-	keys := dataloader.NewKeysFromStrings([]string{"2", "1", "3"})
+	keys := dataloader.NewKeysFromStrings([]string{chainID2.String(), chainID1.String(), notAnID.String()})
 	found := batcher.loadByChainIDs(ctx, keys)
 
 	require.Len(t, found, 3)
-	assert.Equal(t, []relaytypes.NodeStatus{node2}, found[0].Data)
-	assert.Equal(t, []relaytypes.NodeStatus{node1}, found[1].Data)
-	assert.Equal(t, []relaytypes.NodeStatus{}, found[2].Data)
+	assert.Equal(t, []commontypes.NodeStatus{genNodeStat(chainID2.String())}, found[0].Data)
+	assert.Equal(t, []commontypes.NodeStatus{genNodeStat(chainID1.String())}, found[1].Data)
+	assert.Equal(t, []commontypes.NodeStatus{}, found[2].Data)
 }
 
 func TestLoader_FeedsManagers(t *testing.T) {
@@ -113,7 +125,7 @@ func TestLoader_FeedsManagers(t *testing.T) {
 		Name: "manager 3",
 	}
 
-	fsvc.On("ListManagersByIDs", []int64{3, 1, 2, 5}).Return([]feeds.FeedsManager{
+	fsvc.On("ListManagersByIDs", mock.Anything, []int64{3, 1, 2, 5}).Return([]feeds.FeedsManager{
 		mgr1, mgr2, mgr3,
 	}, nil)
 	app.On("GetFeedsService").Return(fsvc)
@@ -155,7 +167,7 @@ func TestLoader_JobProposals(t *testing.T) {
 		Status:         feeds.JobProposalStatusRejected,
 	}
 
-	fsvc.On("ListJobProposalsByManagersIDs", []int64{3, 1, 2}).Return([]feeds.JobProposal{
+	fsvc.On("ListJobProposalsByManagersIDs", mock.Anything, []int64{3, 1, 2}).Return([]feeds.JobProposal{
 		jp1, jp3, jp2,
 	}, nil)
 	app.On("GetFeedsService").Return(fsvc)
@@ -182,7 +194,7 @@ func TestLoader_JobRuns(t *testing.T) {
 	run2 := pipeline.Run{ID: int64(2)}
 	run3 := pipeline.Run{ID: int64(3)}
 
-	jobsORM.On("FindPipelineRunsByIDs", []int64{3, 1, 2}).Return([]pipeline.Run{
+	jobsORM.On("FindPipelineRunsByIDs", mock.Anything, []int64{3, 1, 2}).Return([]pipeline.Run{
 		run3, run1, run2,
 	}, nil)
 	app.On("JobORM").Return(jobsORM)
@@ -212,7 +224,7 @@ func TestLoader_JobsByPipelineSpecIDs(t *testing.T) {
 		job2 := job.Job{ID: int32(3), PipelineSpecID: int32(2)}
 		job3 := job.Job{ID: int32(4), PipelineSpecID: int32(3)}
 
-		jobsORM.On("FindJobsByPipelineSpecIDs", []int32{3, 1, 2}).Return([]job.Job{
+		jobsORM.On("FindJobsByPipelineSpecIDs", mock.Anything, []int32{3, 1, 2}).Return([]job.Job{
 			job1, job2, job3,
 		}, nil)
 		app.On("JobORM").Return(jobsORM)
@@ -235,7 +247,7 @@ func TestLoader_JobsByPipelineSpecIDs(t *testing.T) {
 		app := coremocks.NewApplication(t)
 		ctx := InjectDataloader(testutils.Context(t), app)
 
-		jobsORM.On("FindJobsByPipelineSpecIDs", []int32{3, 1, 2}).Return([]job.Job{}, sql.ErrNoRows)
+		jobsORM.On("FindJobsByPipelineSpecIDs", mock.Anything, []int32{3, 1, 2}).Return([]job.Job{}, sql.ErrNoRows)
 		app.On("JobORM").Return(jobsORM)
 
 		batcher := jobBatcher{app}
@@ -262,7 +274,7 @@ func TestLoader_JobsByExternalJobIDs(t *testing.T) {
 		ejID := uuid.New()
 		job := job.Job{ID: int32(2), ExternalJobID: ejID}
 
-		jobsORM.On("FindJobByExternalJobID", ejID).Return(job, nil)
+		jobsORM.On("FindJobByExternalJobID", mock.Anything, ejID).Return(job, nil)
 		app.On("JobORM").Return(jobsORM)
 
 		batcher := jobBatcher{app}
@@ -293,7 +305,7 @@ func TestLoader_EthTransactionsAttempts(t *testing.T) {
 		TxID: ethTxIDs[1],
 	}
 
-	txStore.On("FindTxAttemptConfirmedByTxIDs", []int64{ethTxIDs[2], ethTxIDs[1], ethTxIDs[0]}).Return([]txmgr.TxAttempt{
+	txStore.On("FindTxAttemptConfirmedByTxIDs", ctx, []int64{ethTxIDs[2], ethTxIDs[1], ethTxIDs[0]}).Return([]txmgr.TxAttempt{
 		attempt1, attempt2,
 	}, nil)
 	app.On("TxmStorageService").Return(txStore)
@@ -323,7 +335,7 @@ func TestLoader_SpecErrorsByJobID(t *testing.T) {
 		specErr2 := job.SpecError{ID: int64(3), JobID: int32(2)}
 		specErr3 := job.SpecError{ID: int64(4), JobID: int32(3)}
 
-		jobsORM.On("FindSpecErrorsByJobIDs", []int32{3, 1, 2}, mock.Anything).Return([]job.SpecError{
+		jobsORM.On("FindSpecErrorsByJobIDs", mock.Anything, []int32{3, 1, 2}, mock.Anything).Return([]job.SpecError{
 			specErr1, specErr2, specErr3,
 		}, nil)
 		app.On("JobORM").Return(jobsORM)
@@ -346,7 +358,7 @@ func TestLoader_SpecErrorsByJobID(t *testing.T) {
 		app := coremocks.NewApplication(t)
 		ctx := InjectDataloader(testutils.Context(t), app)
 
-		jobsORM.On("FindSpecErrorsByJobIDs", []int32{3, 1, 2}, mock.Anything).Return([]job.SpecError{}, sql.ErrNoRows)
+		jobsORM.On("FindSpecErrorsByJobIDs", mock.Anything, []int32{3, 1, 2}, mock.Anything).Return([]job.SpecError{}, sql.ErrNoRows)
 		app.On("JobORM").Return(jobsORM)
 
 		batcher := jobSpecErrorsBatcher{app}
@@ -368,7 +380,7 @@ func TestLoader_loadByEthTransactionID(t *testing.T) {
 	ctx := InjectDataloader(testutils.Context(t), app)
 
 	ethTxID := int64(3)
-	ethTxHash := utils.NewHash()
+	ethTxHash := evmutils.NewHash()
 
 	receipt := txmgr.Receipt{
 		ID:     int64(1),
@@ -382,7 +394,7 @@ func TestLoader_loadByEthTransactionID(t *testing.T) {
 		Receipts: []txmgr.ChainReceipt{txmgr.DbReceiptToEvmReceipt(&receipt)},
 	}
 
-	txStore.On("FindTxAttemptConfirmedByTxIDs", []int64{ethTxID}).Return([]txmgr.TxAttempt{
+	txStore.On("FindTxAttemptConfirmedByTxIDs", ctx, []int64{ethTxID}).Return([]txmgr.TxAttempt{
 		attempt1,
 	}, nil)
 

@@ -9,7 +9,9 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/gateway/network"
 )
 
@@ -25,23 +27,26 @@ func (ssl *serverSideLogic) wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// one wsConnWrapper per client
-	ssl.connWrapper.Restart(c)
+	ssl.connWrapper.Reset(c)
 }
 
 func TestWSConnectionWrapper_ClientReconnect(t *testing.T) {
+	lggr := logger.TestLogger(t)
 	// server
-	ssl := &serverSideLogic{connWrapper: network.NewWSConnectionWrapper()}
+	ssl := &serverSideLogic{connWrapper: network.NewWSConnectionWrapper(lggr)}
+	servicetest.Run(t, ssl.connWrapper)
 	s := httptest.NewServer(http.HandlerFunc(ssl.wsHandler))
 	serverURL := "ws" + strings.TrimPrefix(s.URL, "http")
 	defer s.Close()
 
 	// client
-	clientConnWrapper := network.NewWSConnectionWrapper()
+	clientConnWrapper := network.NewWSConnectionWrapper(lggr)
+	servicetest.Run(t, clientConnWrapper)
 
 	// connect, write a message, disconnect
 	conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
 	require.NoError(t, err)
-	clientConnWrapper.Restart(conn)
+	clientConnWrapper.Reset(conn)
 	writeErr := clientConnWrapper.Write(testutils.Context(t), websocket.TextMessage, []byte("hello"))
 	require.NoError(t, writeErr)
 	<-ssl.connWrapper.ReadChannel() // consumed by server
@@ -54,13 +59,9 @@ func TestWSConnectionWrapper_ClientReconnect(t *testing.T) {
 	// re-connect, write another message, disconnect
 	conn, _, err = websocket.DefaultDialer.Dial(serverURL, nil)
 	require.NoError(t, err)
-	clientConnWrapper.Restart(conn)
+	clientConnWrapper.Reset(conn)
 	writeErr = clientConnWrapper.Write(testutils.Context(t), websocket.TextMessage, []byte("hello again"))
 	require.NoError(t, writeErr)
 	<-ssl.connWrapper.ReadChannel() // consumed by server
 	conn.Close()
-
-	ssl.connWrapper.Close()
-	clientConnWrapper.Close()
-	clientConnWrapper.Close() // safe to call Close() twice
 }

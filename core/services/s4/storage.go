@@ -3,17 +3,19 @@ package s4
 import (
 	"context"
 
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/jonboulle/clockwork"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 // Constraints specifies the global storage constraints.
 type Constraints struct {
-	MaxPayloadSizeBytes uint `json:"maxPayloadSizeBytes"`
-	MaxSlotsPerUser     uint `json:"maxSlotsPerUser"`
+	MaxPayloadSizeBytes    uint   `json:"maxPayloadSizeBytes"`
+	MaxSlotsPerUser        uint   `json:"maxSlotsPerUser"`
+	MaxExpirationLengthSec uint64 `json:"maxExpirationLengthSec"`
 }
 
 // Key identifies a versioned user record.
@@ -68,14 +70,14 @@ type storage struct {
 	lggr       logger.Logger
 	contraints Constraints
 	orm        ORM
-	clock      utils.Clock
+	clock      clockwork.Clock
 }
 
 var _ Storage = (*storage)(nil)
 
-func NewStorage(lggr logger.Logger, contraints Constraints, orm ORM, clock utils.Clock) Storage {
+func NewStorage(lggr logger.Logger, contraints Constraints, orm ORM, clock clockwork.Clock) Storage {
 	return &storage{
-		lggr:       lggr.Named("s4_storage"),
+		lggr:       lggr.Named("S4Storage"),
 		contraints: contraints,
 		orm:        orm,
 		clock:      clock,
@@ -91,13 +93,13 @@ func (s *storage) Get(ctx context.Context, key *Key) (*Record, *Metadata, error)
 		return nil, nil, ErrSlotIdTooBig
 	}
 
-	bigAddress := utils.NewBig(key.Address.Big())
-	row, err := s.orm.Get(bigAddress, key.SlotId, pg.WithParentCtx(ctx))
+	bigAddress := big.New(key.Address.Big())
+	row, err := s.orm.Get(ctx, bigAddress, key.SlotId)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if row.Expiration <= s.clock.Now().UnixMilli() {
+	if row.Version != key.Version || row.Expiration <= s.clock.Now().UnixMilli() {
 		return nil, nil, ErrNotFound
 	}
 
@@ -117,8 +119,12 @@ func (s *storage) Get(ctx context.Context, key *Key) (*Record, *Metadata, error)
 }
 
 func (s *storage) List(ctx context.Context, address common.Address) ([]*SnapshotRow, error) {
-	bigAddress := utils.NewBig(address.Big())
-	return s.orm.GetSnapshot(NewSingleAddressRange(bigAddress), pg.WithParentCtx(ctx))
+	bigAddress := big.New(address.Big())
+	sar, err := NewSingleAddressRange(bigAddress)
+	if err != nil {
+		return nil, err
+	}
+	return s.orm.GetSnapshot(ctx, sar)
 }
 
 func (s *storage) Put(ctx context.Context, key *Key, record *Record, signature []byte) error {
@@ -128,8 +134,12 @@ func (s *storage) Put(ctx context.Context, key *Key, record *Record, signature [
 	if len(record.Payload) > int(s.contraints.MaxPayloadSizeBytes) {
 		return ErrPayloadTooBig
 	}
-	if s.clock.Now().UnixMilli() > record.Expiration {
+	now := s.clock.Now().UnixMilli()
+	if now > record.Expiration {
 		return ErrPastExpiration
+	}
+	if record.Expiration-now > int64(s.contraints.MaxExpirationLengthSec)*1000 {
+		return ErrExpirationTooLong
 	}
 
 	envelope := NewEnvelopeFromRecord(key, record)
@@ -139,7 +149,7 @@ func (s *storage) Put(ctx context.Context, key *Key, record *Record, signature [
 	}
 
 	row := &Row{
-		Address:    utils.NewBig(key.Address.Big()),
+		Address:    big.New(key.Address.Big()),
 		SlotId:     key.SlotId,
 		Payload:    make([]byte, len(record.Payload)),
 		Version:    key.Version,
@@ -150,5 +160,5 @@ func (s *storage) Put(ctx context.Context, key *Key, record *Record, signature [
 	copy(row.Payload, record.Payload)
 	copy(row.Signature, signature)
 
-	return s.orm.Update(row, pg.WithParentCtx(ctx))
+	return s.orm.Update(ctx, row)
 }

@@ -2,11 +2,11 @@ package blockhashstore
 
 import (
 	"context"
+	"crypto/rand"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
-	"golang.org/x/exp/rand"
 )
 
 type TestCoordinator struct {
@@ -59,6 +59,16 @@ func (t *TestBHS) Store(_ context.Context, blockNum uint64) error {
 
 	t.Stored = append(t.Stored, blockNum)
 	return nil
+}
+
+func (t *TestBHS) IsTrusted() bool {
+	return false
+}
+
+func (t *TestBHS) StoreTrusted(
+	ctx context.Context, blockNums []uint64, blockhashes []common.Hash, recentBlock uint64, recentBlockhash common.Hash,
+) error {
+	return errors.New("not implemented")
 }
 
 func (t *TestBHS) IsStored(_ context.Context, blockNum uint64) (bool, error) {

@@ -117,6 +117,22 @@ func (r *SpecResolver) ToGatewaySpec() (*GatewaySpecResolver, bool) {
 	return &GatewaySpecResolver{spec: *r.j.GatewaySpec}, true
 }
 
+func (r *SpecResolver) ToWorkflowSpec() (*WorkflowSpecResolver, bool) {
+	if r.j.Type != job.Workflow {
+		return nil, false
+	}
+
+	return &WorkflowSpecResolver{spec: *r.j.WorkflowSpec}, true
+}
+
+func (r *SpecResolver) ToStandardCapabilitiesSpec() (*StandardCapabilitiesSpecResolver, bool) {
+	if r.j.Type != job.StandardCapabilities {
+		return nil, false
+	}
+
+	return &StandardCapabilitiesSpecResolver{spec: *r.j.StandardCapabilitiesSpec}, true
+}
+
 type CronSpecResolver struct {
 	spec job.CronSpec
 }
@@ -162,11 +178,6 @@ func (r *DirectRequestSpecResolver) MinIncomingConfirmations() int32 {
 	}
 
 	return 0
-}
-
-// EVMChainID resolves the spec's evm chain id.
-func (r *DirectRequestSpecResolver) MinIncomingConfirmationsEnv() bool {
-	return r.spec.MinIncomingConfirmationsEnv
 }
 
 // MinContractPaymentLinkJuels resolves the spec's min contract payment link.
@@ -328,12 +339,6 @@ func (r *OCRSpecResolver) BlockchainTimeout() *string {
 	return &timeout
 }
 
-// BlockchainTimeoutEnv resolves whether the spec's blockchain timeout comes
-// from an env var.
-func (r *OCRSpecResolver) BlockchainTimeoutEnv() bool {
-	return r.spec.BlockchainTimeoutEnv
-}
-
 // ContractAddress resolves the spec's contract address.
 func (r *OCRSpecResolver) ContractAddress() string {
 	return r.spec.ContractAddress.String()
@@ -350,12 +355,6 @@ func (r *OCRSpecResolver) ContractConfigConfirmations() *int32 {
 	return &confirmations
 }
 
-// ContractConfigConfirmationsEnv resolves whether spec's confirmations
-// config comes from an env var.
-func (r *OCRSpecResolver) ContractConfigConfirmationsEnv() bool {
-	return r.spec.ContractConfigConfirmationsEnv
-}
-
 // ContractConfigTrackerPollInterval resolves the spec's contract tracker poll
 // interval config.
 func (r *OCRSpecResolver) ContractConfigTrackerPollInterval() *string {
@@ -368,12 +367,6 @@ func (r *OCRSpecResolver) ContractConfigTrackerPollInterval() *string {
 	return &interval
 }
 
-// ContractConfigTrackerPollIntervalEnv resolves the whether spec's tracker poll
-// config comes from an env var.
-func (r *OCRSpecResolver) ContractConfigTrackerPollIntervalEnv() bool {
-	return r.spec.ContractConfigTrackerPollIntervalEnv
-}
-
 // ContractConfigTrackerSubscribeInterval resolves the spec's tracker subscribe
 // interval config.
 func (r *OCRSpecResolver) ContractConfigTrackerSubscribeInterval() *string {
@@ -384,12 +377,6 @@ func (r *OCRSpecResolver) ContractConfigTrackerSubscribeInterval() *string {
 	interval := r.spec.ContractConfigTrackerSubscribeInterval.Duration().String()
 
 	return &interval
-}
-
-// ContractConfigTrackerSubscribeIntervalEnv resolves whether spec's tracker
-// subscribe interval config comes from an env var.
-func (r *OCRSpecResolver) ContractConfigTrackerSubscribeIntervalEnv() bool {
-	return r.spec.ContractConfigTrackerSubscribeIntervalEnv
 }
 
 // CreatedAt resolves the spec's created at timestamp.
@@ -413,32 +400,14 @@ func (r *OCRSpecResolver) DatabaseTimeout() string {
 	return r.spec.DatabaseTimeout.Duration().String()
 }
 
-// DatabaseTimeoutEnv resolves the whether spec's database timeout
-// config comes from an env var.
-func (r *OCRSpecResolver) DatabaseTimeoutEnv() bool {
-	return r.spec.DatabaseTimeoutEnv
-}
-
 // ObservationGracePeriod resolves the spec's observation grace period.
 func (r *OCRSpecResolver) ObservationGracePeriod() string {
 	return r.spec.ObservationGracePeriod.Duration().String()
 }
 
-// ObservationGracePeriodEnv resolves the whether spec's observation grace period
-// config comes from an env var.
-func (r *OCRSpecResolver) ObservationGracePeriodEnv() bool {
-	return r.spec.ObservationGracePeriodEnv
-}
-
 // ContractTransmitterTransmitTimeout resolves the spec's contract transmitter transmit timeout.
 func (r *OCRSpecResolver) ContractTransmitterTransmitTimeout() string {
 	return r.spec.ContractTransmitterTransmitTimeout.Duration().String()
-}
-
-// ContractTransmitterTransmitTimeoutEnv resolves the whether spec's
-// contract transmitter transmit timeout config comes from an env var.
-func (r *OCRSpecResolver) ContractTransmitterTransmitTimeoutEnv() bool {
-	return r.spec.ContractTransmitterTransmitTimeoutEnv
 }
 
 // IsBootstrapPeer resolves whether spec is a bootstrap peer.
@@ -466,23 +435,6 @@ func (r *OCRSpecResolver) ObservationTimeout() *string {
 	timeout := r.spec.ObservationTimeout.Duration().String()
 
 	return &timeout
-}
-
-// ObservationTimeoutEnv resolves whether spec's observation timeout comes
-// from an env var.
-func (r *OCRSpecResolver) ObservationTimeoutEnv() bool {
-	return r.spec.ObservationTimeoutEnv
-}
-
-// P2PBootstrapPeers resolves the spec's p2p bootstrap peers
-func (r *OCRSpecResolver) P2PBootstrapPeers() *[]string {
-	if len(r.spec.P2PBootstrapPeers) == 0 {
-		return nil
-	}
-
-	peers := []string(r.spec.P2PBootstrapPeers)
-
-	return &peers
 }
 
 // P2PV2Bootstrappers resolves the OCR1 spec's p2pv2 bootstrappers
@@ -585,7 +537,7 @@ func (r *OCR2SpecResolver) P2PV2Bootstrappers() *[]string {
 
 // Relay resolves the spec's relay
 func (r *OCR2SpecResolver) Relay() string {
-	return string(r.spec.Relay)
+	return r.spec.Relay
 }
 
 // RelayConfig resolves the spec's relay config
@@ -614,8 +566,12 @@ func (r *OCR2SpecResolver) TransmitterID() *string {
 }
 
 // FeedID resolves the spec's feed ID
-func (r *OCR2SpecResolver) FeedID() string {
-	return r.spec.FeedID.String()
+func (r *OCR2SpecResolver) FeedID() *string {
+	if r.spec.FeedID == nil {
+		return nil
+	}
+	feedID := r.spec.FeedID.String()
+	return &feedID
 }
 
 type VRFSpecResolver struct {
@@ -625,11 +581,6 @@ type VRFSpecResolver struct {
 // MinIncomingConfirmations resolves the spec's min incoming confirmations.
 func (r *VRFSpecResolver) MinIncomingConfirmations() int32 {
 	return int32(r.spec.MinIncomingConfirmations)
-}
-
-// MinIncomingConfirmations resolves the spec's min incoming confirmations.
-func (r *VRFSpecResolver) MinIncomingConfirmationsEnv() bool {
-	return r.spec.ConfirmationsEnv
 }
 
 // CoordinatorAddress resolves the spec's coordinator address.
@@ -706,6 +657,11 @@ func (r *VRFSpecResolver) BatchFulfillmentGasMultiplier() float64 {
 	return float64(r.spec.BatchFulfillmentGasMultiplier)
 }
 
+// CustomRevertsPipelineEnabled resolves the spec's custom reverts pipeline enabled flag.
+func (r *VRFSpecResolver) CustomRevertsPipelineEnabled() *bool {
+	return &r.spec.CustomRevertsPipelineEnabled
+}
+
 // ChunkSize resolves the spec's chunk size.
 func (r *VRFSpecResolver) ChunkSize() int32 {
 	return int32(r.spec.ChunkSize)
@@ -771,6 +727,15 @@ func (b *BlockhashStoreSpecResolver) CoordinatorV2Address() *string {
 	return &addr
 }
 
+// CoordinatorV2PlusAddress returns the address of the V2Plus Coordinator, if any.
+func (b *BlockhashStoreSpecResolver) CoordinatorV2PlusAddress() *string {
+	if b.spec.CoordinatorV2PlusAddress == nil {
+		return nil
+	}
+	addr := b.spec.CoordinatorV2PlusAddress.String()
+	return &addr
+}
+
 // WaitBlocks returns the job's WaitBlocks param.
 func (b *BlockhashStoreSpecResolver) WaitBlocks() int32 {
 	return b.spec.WaitBlocks
@@ -781,9 +746,28 @@ func (b *BlockhashStoreSpecResolver) LookbackBlocks() int32 {
 	return b.spec.LookbackBlocks
 }
 
+// HeartbeatPeriod returns the job's HeartbeatPeriod param.
+func (b *BlockhashStoreSpecResolver) HeartbeatPeriod() string {
+	return b.spec.HeartbeatPeriod.String()
+}
+
 // BlockhashStoreAddress returns the job's BlockhashStoreAddress param.
 func (b *BlockhashStoreSpecResolver) BlockhashStoreAddress() string {
 	return b.spec.BlockhashStoreAddress.String()
+}
+
+// TrustedBlockhashStoreAddress returns the address of the job's TrustedBlockhashStoreAddress, if any.
+func (b *BlockhashStoreSpecResolver) TrustedBlockhashStoreAddress() *string {
+	if b.spec.TrustedBlockhashStoreAddress == nil {
+		return nil
+	}
+	addr := b.spec.TrustedBlockhashStoreAddress.String()
+	return &addr
+}
+
+// BatchBlockhashStoreAddress returns the job's BatchBlockhashStoreAddress param.
+func (b *BlockhashStoreSpecResolver) TrustedBlockhashStoreBatchSize() int32 {
+	return b.spec.TrustedBlockhashStoreBatchSize
 }
 
 // PollPeriod return's the job's PollPeriod param.
@@ -839,6 +823,15 @@ func (b *BlockHeaderFeederSpecResolver) CoordinatorV2Address() *string {
 		return nil
 	}
 	addr := b.spec.CoordinatorV2Address.String()
+	return &addr
+}
+
+// CoordinatorV2PlusAddress returns the address of the V2 Coordinator Plus, if any.
+func (b *BlockHeaderFeederSpecResolver) CoordinatorV2PlusAddress() *string {
+	if b.spec.CoordinatorV2PlusAddress == nil {
+		return nil
+	}
+	addr := b.spec.CoordinatorV2PlusAddress.String()
 	return &addr
 }
 
@@ -922,7 +915,7 @@ func (r *BootstrapSpecResolver) ContractID() string {
 
 // Relay resolves the spec's relay
 func (r *BootstrapSpecResolver) Relay() string {
-	return string(r.spec.Relay)
+	return r.spec.Relay
 }
 
 // RelayConfig resolves the spec's relay config
@@ -992,4 +985,52 @@ func (r *GatewaySpecResolver) GatewayConfig() gqlscalar.Map {
 
 func (r *GatewaySpecResolver) CreatedAt() graphql.Time {
 	return graphql.Time{Time: r.spec.CreatedAt}
+}
+
+type WorkflowSpecResolver struct {
+	spec job.WorkflowSpec
+}
+
+func (r *WorkflowSpecResolver) ID() graphql.ID {
+	return graphql.ID(stringutils.FromInt32(r.spec.ID))
+}
+
+func (r *WorkflowSpecResolver) WorkflowID() string {
+	return r.spec.WorkflowID
+}
+
+func (r *WorkflowSpecResolver) Workflow() string {
+	return r.spec.Workflow
+}
+
+func (r *WorkflowSpecResolver) WorkflowOwner() string {
+	return r.spec.WorkflowOwner
+}
+
+func (r *WorkflowSpecResolver) CreatedAt() graphql.Time {
+	return graphql.Time{Time: r.spec.CreatedAt}
+}
+
+func (r *WorkflowSpecResolver) UpdatedAt() graphql.Time {
+	return graphql.Time{Time: r.spec.UpdatedAt}
+}
+
+type StandardCapabilitiesSpecResolver struct {
+	spec job.StandardCapabilitiesSpec
+}
+
+func (r *StandardCapabilitiesSpecResolver) ID() graphql.ID {
+	return graphql.ID(stringutils.FromInt32(r.spec.ID))
+}
+
+func (r *StandardCapabilitiesSpecResolver) CreatedAt() graphql.Time {
+	return graphql.Time{Time: r.spec.CreatedAt}
+}
+
+func (r *StandardCapabilitiesSpecResolver) Command() string {
+	return r.spec.Command
+}
+
+func (r *StandardCapabilitiesSpecResolver) Config() *string {
+	return &r.spec.Config
 }

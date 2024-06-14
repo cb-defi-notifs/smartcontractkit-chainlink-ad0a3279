@@ -8,10 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/web"
 	"github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
@@ -93,17 +93,17 @@ func TestDKGEncryptKeysController_Delete_HappyPath(t *testing.T) {
 	afterKeys, err := keyStore.DKGEncrypt().GetAll()
 	assert.NoError(t, err)
 	assert.Equal(t, initialLength-1, len(afterKeys))
-
 }
 
 func setupDKGEncryptKeysControllerTests(t *testing.T) (cltest.HTTPClientCleaner, keystore.Master) {
 	t.Helper()
 
 	app := cltest.NewApplication(t)
-	require.NoError(t, app.Start(testutils.Context(t)))
-	require.NoError(t, app.KeyStore.DKGEncrypt().Add(cltest.DefaultDKGEncryptKey))
+	ctx := testutils.Context(t)
+	require.NoError(t, app.Start(ctx))
+	require.NoError(t, app.KeyStore.DKGEncrypt().Add(ctx, cltest.DefaultDKGEncryptKey))
 
-	client := app.NewHTTPClient(cltest.APIEmailAdmin)
+	client := app.NewHTTPClient(nil)
 
 	return client, app.GetKeyStore()
 }

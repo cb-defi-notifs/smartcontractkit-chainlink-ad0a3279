@@ -12,28 +12,26 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
-
-	txmgrtypes "github.com/smartcontractkit/chainlink/v2/common/txmgr/types"
-	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-
 	"github.com/stretchr/testify/require"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/tests"
+
 	txmgrcommon "github.com/smartcontractkit/chainlink/v2/common/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	txmgrtypes "github.com/smartcontractkit/chainlink/v2/common/txmgr/types"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
 	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	v1 "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/solidity_vrf_coordinator_interface"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg/datatypes"
 )
 
 func TestFactory(t *testing.T) {
-	client := cltest.NewEthMocksWithDefaultChain(t)
+	client := testutils.NewEthClientMockWithDefaultChain(t)
 	factory := &txmgr.CheckerFactory{Client: client}
 
 	t.Run("no checker", func(t *testing.T) {
@@ -69,6 +67,24 @@ func TestFactory(t *testing.T) {
 		require.Nil(t, c)
 	})
 
+	t.Run("vrf v2 plus checker", func(t *testing.T) {
+		c, err := factory.BuildChecker(txmgr.TransmitCheckerSpec{
+			CheckerType:           txmgr.TransmitCheckerTypeVRFV2Plus,
+			VRFCoordinatorAddress: testutils.NewAddressPtr(),
+			VRFRequestBlockNumber: big.NewInt(1),
+		})
+		require.NoError(t, err)
+		require.IsType(t, &txmgr.VRFV2Checker{}, c)
+
+		// request block number not provided should error out.
+		c, err = factory.BuildChecker(txmgr.TransmitCheckerSpec{
+			CheckerType:           txmgr.TransmitCheckerTypeVRFV2Plus,
+			VRFCoordinatorAddress: testutils.NewAddressPtr(),
+		})
+		require.Error(t, err)
+		require.Nil(t, c)
+	})
+
 	t.Run("simulate checker", func(t *testing.T) {
 		c, err := factory.BuildChecker(txmgr.TransmitCheckerSpec{
 			CheckerType: txmgr.TransmitCheckerTypeSimulate,
@@ -86,9 +102,9 @@ func TestFactory(t *testing.T) {
 }
 
 func TestTransmitCheckers(t *testing.T) {
-	client := evmtest.NewEthClientMockWithDefaultChain(t)
-	log := logger.TestLogger(t)
-	ctx := testutils.Context(t)
+	client := testutils.NewEthClientMockWithDefaultChain(t)
+	log := logger.Sugared(logger.Test(t))
+	ctx := tests.Context(t)
 
 	t.Run("no checker", func(t *testing.T) {
 		checker := txmgr.NoChecker
@@ -146,7 +162,7 @@ func TestTransmitCheckers(t *testing.T) {
 				mock.AnythingOfType("*hexutil.Bytes"), "eth_call",
 				mock.MatchedBy(func(callarg map[string]interface{}) bool {
 					return fmt.Sprintf("%s", callarg["value"]) == "0x282" // 642
-				}), "latest").Return(errors.New("error!")).Once()
+				}), "latest").Return(pkgerrors.New("error")).Once()
 
 			// Non-revert errors are logged but should not prevent transmission, and do not need
 			// to be passed to the caller
@@ -174,7 +190,7 @@ func TestTransmitCheckers(t *testing.T) {
 
 			b, err := json.Marshal(meta)
 			require.NoError(t, err)
-			metaJson := datatypes.JSON(b)
+			metaJson := sqlutil.JSON(b)
 
 			tx := txmgr.Tx{
 				FromAddress:    common.HexToAddress("0xfe0629509E6CB8dfa7a99214ae58Ceb465d5b5A9"),
@@ -202,7 +218,7 @@ func TestTransmitCheckers(t *testing.T) {
 			Callbacks: func(opts *bind.CallOpts, reqID [32]byte) (v1.Callbacks, error) {
 				if opts.BlockNumber.Cmp(big.NewInt(6)) != 0 {
 					// Ensure correct logic is applied to get callbacks.
-					return v1.Callbacks{}, errors.New("error getting callback")
+					return v1.Callbacks{}, pkgerrors.New("error getting callback")
 				}
 				if reqID == r1 {
 					// Request 1 is already fulfilled
@@ -211,12 +227,11 @@ func TestTransmitCheckers(t *testing.T) {
 					}, nil
 				} else if reqID == r2 {
 					// Request 2 errors
-					return v1.Callbacks{}, errors.New("error getting commitment")
-				} else {
-					return v1.Callbacks{
-						SeedAndBlockNum: [32]byte{1},
-					}, nil
+					return v1.Callbacks{}, pkgerrors.New("error getting commitment")
 				}
+				return v1.Callbacks{
+					SeedAndBlockNum: [32]byte{1},
+				}, nil
 			},
 			Client: client,
 		}
@@ -259,7 +274,7 @@ func TestTransmitCheckers(t *testing.T) {
 
 		t.Run("failure fetching tx receipt and block head", func(t *testing.T) {
 			tx, attempt := txRequest(t, r1, false)
-			mockBatch.Return(errors.New("could not fetch"))
+			mockBatch.Return(pkgerrors.New("could not fetch"))
 			err := checker.Check(ctx, log, tx, attempt)
 			require.NoError(t, err)
 		})
@@ -279,7 +294,7 @@ func TestTransmitCheckers(t *testing.T) {
 
 			b, err := json.Marshal(meta)
 			require.NoError(t, err)
-			metaJson := datatypes.JSON(b)
+			metaJson := sqlutil.JSON(b)
 
 			tx := txmgr.Tx{
 				FromAddress:    common.HexToAddress("0xfe0629509E6CB8dfa7a99214ae58Ceb465d5b5A9"),
@@ -306,11 +321,10 @@ func TestTransmitCheckers(t *testing.T) {
 					return [32]byte{}, nil
 				} else if requestID.String() == "2" {
 					// Request 2 errors
-					return [32]byte{}, errors.New("error getting commitment")
-				} else {
-					// All other requests are unfulfilled
-					return [32]byte{1}, nil
+					return [32]byte{}, pkgerrors.New("error getting commitment")
 				}
+				// All other requests are unfulfilled
+				return [32]byte{1}, nil
 			},
 			HeadByNumber: func(ctx context.Context, n *big.Int) (*evmtypes.Head, error) {
 				return &evmtypes.Head{
@@ -338,7 +352,7 @@ func TestTransmitCheckers(t *testing.T) {
 
 		t.Run("can't get header", func(t *testing.T) {
 			checker.HeadByNumber = func(ctx context.Context, n *big.Int) (*evmtypes.Head, error) {
-				return nil, errors.New("can't get head")
+				return nil, pkgerrors.New("can't get head")
 			}
 			tx, attempt := txRequest(t, big.NewInt(3))
 			require.NoError(t, checker.Check(ctx, log, tx, attempt))

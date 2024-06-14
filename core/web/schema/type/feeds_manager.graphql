@@ -9,6 +9,7 @@ type Plugins {
 	execute: Boolean!
 	median: Boolean!
 	mercury: Boolean!
+	rebalancer: Boolean!
 }
 
 type FeedsManager {
@@ -27,6 +28,7 @@ type FeedsManagerChainConfig {
 	chainID: String!
 	chainType: String!
 	accountAddr: String!
+	accountAddrPubKey: String
 	adminAddr: String!
 	fluxMonitorJobConfig: FluxMonitorJobConfig!
 	ocr1JobConfig: OCR1JobConfig!
@@ -49,6 +51,7 @@ type OCR2JobConfig {
 	enabled: Boolean!
 	isBootstrap: Boolean!
 	multiaddr: String
+	forwarderAddress: String
 	p2pPeerID: String
 	keyBundleID: String
 	plugins: Plugins!
@@ -107,6 +110,7 @@ input CreateFeedsManagerChainConfigInput {
 	chainID: String!
 	chainType: String!
 	accountAddr: String!
+	accountAddrPubKey: String
 	adminAddr: String!
 	fluxMonitorEnabled: Boolean!
 	ocr1Enabled: Boolean!
@@ -117,6 +121,7 @@ input CreateFeedsManagerChainConfigInput {
 	ocr2Enabled: Boolean!
 	ocr2IsBootstrap: Boolean
 	ocr2Multiaddr: String
+	ocr2ForwarderAddress: String
 	ocr2P2PPeerID: String
 	ocr2KeyBundleID: String
 	ocr2Plugins: String!
@@ -147,6 +152,7 @@ union DeleteFeedsManagerChainConfigPayload = DeleteFeedsManagerChainConfigSucces
 
 input UpdateFeedsManagerChainConfigInput {
 	accountAddr: String!
+	accountAddrPubKey: String
 	adminAddr: String!
 	fluxMonitorEnabled: Boolean!
 	ocr1Enabled: Boolean!
@@ -157,6 +163,7 @@ input UpdateFeedsManagerChainConfigInput {
 	ocr2Enabled: Boolean!
 	ocr2IsBootstrap: Boolean
 	ocr2Multiaddr: String
+	ocr2ForwarderAddress: String
 	ocr2P2PPeerID: String
 	ocr2KeyBundleID: String
 	ocr2Plugins: String!

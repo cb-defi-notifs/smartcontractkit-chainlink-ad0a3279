@@ -214,7 +214,6 @@ func setupOCR2VRFNodes(e helpers.Environment) {
 	if *useForwarder {
 		fmt.Println("Setting authorized senders...")
 		for i, f := range forwarderAddresses {
-
 			// Convert the sending strings for a transmitter to addresses.
 			var sendinKeysAddresses []common.Address
 			sendingKeysStrings := sendingKeys[i+1]
@@ -232,9 +231,7 @@ func setupOCR2VRFNodes(e helpers.Environment) {
 			transmitters[i+1] = f.String()
 		}
 	} else {
-		for _, t := range transmitters[1:] {
-			nodesToFund = append(nodesToFund, t)
-		}
+		nodesToFund = append(nodesToFund, transmitters[1:]...)
 	}
 
 	var payees []common.Address
@@ -434,7 +431,7 @@ func setupOCR2VRFNodesForInfraWithForwarder(e helpers.Environment) {
 				true, // forwardingAllowed
 				"",   // P2P Bootstrapper
 				e.ChainID,
-				sendingKeys[i],
+				sendingKeys[adjustedIndex],
 				dkgEncrypters[adjustedIndex],
 				dkgSigners[adjustedIndex],
 				*keyID,

@@ -23,33 +23,29 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/getsentry/sentry-go"
 	"github.com/gin-gonic/gin"
-	"github.com/pelletier/go-toml/v2"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 	"go.uber.org/multierr"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/smartcontractkit/sqlx"
+	"github.com/jmoiron/sqlx"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/loop"
-	pkgsolana "github.com/smartcontractkit/chainlink-solana/pkg/solana"
-	pkgstarknet "github.com/smartcontractkit/chainlink-starknet/relayer/pkg/chainlink"
-
+	"github.com/smartcontractkit/chainlink-common/pkg/loop"
+	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/mailbox"
 	"github.com/smartcontractkit/chainlink/v2/core/build"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/cosmos"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/solana"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/starknet"
+	"github.com/smartcontractkit/chainlink/v2/core/capabilities"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/legacyevm"
 	"github.com/smartcontractkit/chainlink/v2/core/config"
-	v2 "github.com/smartcontractkit/chainlink/v2/core/config/v2"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/logger/audit"
+	"github.com/smartcontractkit/chainlink/v2/core/services"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/periodicbackup"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
-	"github.com/smartcontractkit/chainlink/v2/core/services/relay"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc/cache"
 	"github.com/smartcontractkit/chainlink/v2/core/services/versioning"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
 	"github.com/smartcontractkit/chainlink/v2/core/sessions"
@@ -67,12 +63,21 @@ var (
 	grpcOpts        loop.GRPCOpts
 )
 
-func initGlobals(cfg config.Prometheus) {
-	// Avoid double initializations.
+func initGlobals(cfgProm config.Prometheus, cfgTracing config.Tracing, logger logger.Logger) error {
+	// Avoid double initializations, but does not prevent relay methods from being called multiple times.
+	var err error
 	initGlobalsOnce.Do(func() {
-		prometheus = ginprom.New(ginprom.Namespace("service"), ginprom.Token(cfg.AuthToken()))
-		grpcOpts = loop.SetupTelemetry(nil) // default prometheus.Registerer
+		prometheus = ginprom.New(ginprom.Namespace("service"), ginprom.Token(cfgProm.AuthToken()))
+		grpcOpts = loop.NewGRPCOpts(nil) // default prometheus.Registerer
+		err = loop.SetupTracing(loop.TracingConfig{
+			Enabled:         cfgTracing.Enabled(),
+			CollectorTarget: cfgTracing.CollectorTarget(),
+			NodeAttributes:  cfgTracing.Attributes(),
+			SamplingRatio:   cfgTracing.SamplingRatio(),
+			OnDialError:     func(error) { logger.Errorw("Failed to dial", "err", err) },
+		})
 	})
+	return err
 }
 
 var (
@@ -100,7 +105,7 @@ type Shell struct {
 
 	configFiles      []string
 	configFilesIsSet bool
-	secretsFile      string
+	secretsFiles     []string
 	secretsFileIsSet bool
 }
 
@@ -133,88 +138,80 @@ type ChainlinkAppFactory struct{}
 
 // NewApplication returns a new instance of the node with the given config.
 func (n ChainlinkAppFactory) NewApplication(ctx context.Context, cfg chainlink.GeneralConfig, appLggr logger.Logger, db *sqlx.DB) (app chainlink.Application, err error) {
-	initGlobals(cfg.Prometheus())
+	err = initGlobals(cfg.Prometheus(), cfg.Tracing(), appLggr)
+	if err != nil {
+		appLggr.Errorf("Failed to initialize globals: %v", err)
+	}
 
-	err = handleNodeVersioning(db, appLggr, cfg.RootDir(), cfg.Database())
+	err = migrate.SetMigrationENVVars(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	keyStore := keystore.New(db, utils.GetScryptParams(cfg), appLggr, cfg.Database())
-	mailMon := utils.NewMailboxMonitor(cfg.AppID().String())
-
-	// Upsert EVM chains/nodes from ENV, necessary for backwards compatibility
-	if cfg.EVMEnabled() {
-		var ids []utils.Big
-		for _, c := range cfg.EVMConfigs() {
-			c := c
-			ids = append(ids, *c.ChainID)
-		}
-		if len(ids) > 0 {
-			if err = evm.EnsureChains(db, appLggr, cfg.Database(), ids); err != nil {
-				return nil, errors.Wrap(err, "failed to setup EVM chains")
-			}
-		}
-	}
-
-	dbListener := cfg.Database().Listener()
-	eventBroadcaster := pg.NewEventBroadcaster(cfg.Database().URL(), dbListener.MinReconnectInterval(), dbListener.MaxReconnectDuration(), appLggr, cfg.AppID())
-	ccOpts := evm.ChainSetOpts{
-		Config:           cfg,
-		Logger:           appLggr,
-		DB:               db,
-		KeyStore:         keyStore.Eth(),
-		EventBroadcaster: eventBroadcaster,
-		MailMon:          mailMon,
-	}
-
-	loopRegistry := plugins.NewLoopRegistry()
-
-	var chains chainlink.Chains
-	chains.EVM, err = evm.NewTOMLChainSet(ctx, ccOpts)
+	err = handleNodeVersioning(ctx, db, appLggr, cfg.RootDir(), cfg.Database(), cfg.WebServer().HTTPPort())
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to load EVM chainset")
+		return nil, err
 	}
+
+	ds := sqlutil.WrapDataSource(db, appLggr, sqlutil.TimeoutHook(cfg.Database().DefaultQueryTimeout), sqlutil.MonitorHook(cfg.Database().LogSQL))
+
+	keyStore := keystore.New(ds, utils.GetScryptParams(cfg), appLggr)
+	mailMon := mailbox.NewMonitor(cfg.AppID().String(), appLggr.Named("Mailbox"))
+
+	loopRegistry := plugins.NewLoopRegistry(appLggr, cfg.Tracing())
+
+	mercuryPool := wsrpc.NewPool(appLggr, cache.Config{
+		LatestReportTTL:      cfg.Mercury().Cache().LatestReportTTL(),
+		MaxStaleAge:          cfg.Mercury().Cache().MaxStaleAge(),
+		LatestReportDeadline: cfg.Mercury().Cache().LatestReportDeadline(),
+	})
+
+	capabilitiesRegistry := capabilities.NewRegistry(appLggr)
+
+	// create the relayer-chain interoperators from application configuration
+	relayerFactory := chainlink.RelayerFactory{
+		Logger:               appLggr,
+		LoopRegistry:         loopRegistry,
+		GRPCOpts:             grpcOpts,
+		MercuryPool:          mercuryPool,
+		CapabilitiesRegistry: capabilitiesRegistry,
+	}
+
+	evmFactoryCfg := chainlink.EVMFactoryConfig{
+		CSAETHKeystore:     keyStore,
+		ChainOpts:          legacyevm.ChainOpts{AppConfig: cfg, MailMon: mailMon, DS: ds},
+		MercuryTransmitter: cfg.Mercury().Transmitter(),
+	}
+	// evm always enabled for backward compatibility
+	// TODO BCF-2510 this needs to change in order to clear the path for EVM extraction
+	initOps := []chainlink.CoreRelayerChainInitFunc{chainlink.InitEVM(ctx, relayerFactory, evmFactoryCfg)}
 
 	if cfg.CosmosEnabled() {
-		cosmosLggr := appLggr.Named("Cosmos")
-		opts := cosmos.ChainSetOpts{
-			Config:           cfg,
-			Logger:           cosmosLggr,
-			DB:               db,
-			KeyStore:         keyStore.Cosmos(),
-			EventBroadcaster: eventBroadcaster,
+		cosmosCfg := chainlink.CosmosFactoryConfig{
+			Keystore:    keyStore.Cosmos(),
+			TOMLConfigs: cfg.CosmosConfigs(),
+			DS:          ds,
 		}
-		cfgs := cfg.CosmosConfigs()
-		opts.Configs = cosmos.NewConfigs(cfgs)
-		chains.Cosmos, err = cosmos.NewChainSet(opts, cfgs)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to load Cosmos chainset")
-		}
+		initOps = append(initOps, chainlink.InitCosmos(ctx, relayerFactory, cosmosCfg))
 	}
-
-	rf := relayerFactory{
-		Logger:        appLggr,
-		DB:            db,
-		GeneralConfig: cfg,
-		LoopRegistry:  loopRegistry,
-		GRPCOpts:      grpcOpts,
-	}
-
 	if cfg.SolanaEnabled() {
-		var err2 error
-		chains.Solana, err2 = rf.NewSolana(keyStore.Solana())
-		if err2 != nil {
-			return nil, fmt.Errorf("failed to setup Solana relayer: %w", err2)
+		solanaCfg := chainlink.SolanaFactoryConfig{
+			Keystore:    keyStore.Solana(),
+			TOMLConfigs: cfg.SolanaConfigs(),
 		}
+		initOps = append(initOps, chainlink.InitSolana(ctx, relayerFactory, solanaCfg))
+	}
+	if cfg.StarkNetEnabled() {
+		starkCfg := chainlink.StarkNetFactoryConfig{
+			Keystore:    keyStore.StarkNet(),
+			TOMLConfigs: cfg.StarknetConfigs(),
+		}
+		initOps = append(initOps, chainlink.InitStarknet(ctx, relayerFactory, starkCfg))
 	}
 
-	if cfg.StarkNetEnabled() {
-		var err2 error
-		chains.StarkNet, err2 = rf.NewStarkNet(keyStore.StarkNet())
-		if err2 != nil {
-			return nil, fmt.Errorf("failed to setup StarkNet relayer: %w", err2)
-		}
+	relayChainInterops, err := chainlink.NewCoreRelayerChainInteroperators(initOps...)
+	if err != nil {
+		return nil, err
 	}
 
 	// Configure and optionally start the audit log forwarder service
@@ -225,148 +222,36 @@ func (n ChainlinkAppFactory) NewApplication(ctx context.Context, cfg chainlink.G
 
 	restrictedClient := clhttp.NewRestrictedHTTPClient(cfg.Database(), appLggr)
 	unrestrictedClient := clhttp.NewUnrestrictedHTTPClient()
-	externalInitiatorManager := webhook.NewExternalInitiatorManager(db, unrestrictedClient, appLggr, cfg.Database())
+	externalInitiatorManager := webhook.NewExternalInitiatorManager(ds, unrestrictedClient)
 	return chainlink.NewApplication(chainlink.ApplicationOpts{
-		Config:                   cfg,
-		SqlxDB:                   db,
-		KeyStore:                 keyStore,
-		Chains:                   chains,
-		EventBroadcaster:         eventBroadcaster,
-		MailMon:                  mailMon,
-		Logger:                   appLggr,
-		AuditLogger:              auditLogger,
-		ExternalInitiatorManager: externalInitiatorManager,
-		Version:                  static.Version,
-		RestrictedHTTPClient:     restrictedClient,
-		UnrestrictedHTTPClient:   unrestrictedClient,
-		SecretGenerator:          chainlink.FilePersistedSecretGenerator{},
-		LoopRegistry:             loopRegistry,
-		GRPCOpts:                 grpcOpts,
+		Config:                     cfg,
+		DS:                         ds,
+		KeyStore:                   keyStore,
+		RelayerChainInteroperators: relayChainInterops,
+		MailMon:                    mailMon,
+		Logger:                     appLggr,
+		AuditLogger:                auditLogger,
+		ExternalInitiatorManager:   externalInitiatorManager,
+		Version:                    static.Version,
+		RestrictedHTTPClient:       restrictedClient,
+		UnrestrictedHTTPClient:     unrestrictedClient,
+		SecretGenerator:            chainlink.FilePersistedSecretGenerator{},
+		LoopRegistry:               loopRegistry,
+		GRPCOpts:                   grpcOpts,
+		MercuryPool:                mercuryPool,
+		CapabilitiesRegistry:       capabilitiesRegistry,
 	})
 }
 
-type relayerFactory struct {
-	logger.Logger
-	*sqlx.DB
-	chainlink.GeneralConfig
-	*plugins.LoopRegistry
-	loop.GRPCOpts
-}
-
-func (r relayerFactory) NewSolana(ks keystore.Solana) (loop.Relayer, error) {
-	var (
-		solanaRelayer loop.Relayer
-		ids           []string
-		solLggr       = r.Logger.Named("Solana")
-		cfgs          = r.SolanaConfigs()
-		signer        = &keystore.SolanaSigner{ks}
-	)
-	for _, c := range cfgs {
-		c := c
-		ids = append(ids, *c.ChainID)
-	}
-	if len(ids) > 0 {
-		if err := solana.EnsureChains(r.DB, solLggr, r.Database(), ids); err != nil {
-			return nil, fmt.Errorf("failed to setup Solana chains: %w", err)
-		}
-	}
-
-	if cmdName := v2.EnvSolanaPluginCmd.Get(); cmdName != "" {
-		// setup the solana relayer to be a LOOP
-		tomls, err := toml.Marshal(struct {
-			Solana solana.SolanaConfigs
-		}{Solana: cfgs})
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal Solana configs: %w", err)
-		}
-
-		solCmdFn, err := plugins.NewCmdFactory(r.Register, plugins.CmdConfig{
-			ID:  solLggr.Name(),
-			Cmd: cmdName,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Solana LOOP command: %w", err)
-		}
-		solanaRelayer = loop.NewRelayerService(solLggr, r.GRPCOpts, solCmdFn, string(tomls), signer)
-	} else {
-		// fallback to embedded chainset
-		opts := solana.ChainSetOpts{
-			Logger:   solLggr,
-			KeyStore: signer,
-			Configs:  solana.NewConfigs(cfgs),
-		}
-		chainSet, err := solana.NewChainSet(opts, cfgs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load Solana chainset: %w", err)
-		}
-		solanaRelayer = relay.NewRelayerAdapter(pkgsolana.NewRelayer(solLggr, chainSet), chainSet)
-	}
-	return solanaRelayer, nil
-}
-
-func (r relayerFactory) NewStarkNet(ks keystore.StarkNet) (loop.Relayer, error) {
-	var (
-		starknetRelayer loop.Relayer
-		ids             []string
-		starkLggr       = r.Logger.Named("StarkNet")
-		cfgs            = r.StarknetConfigs()
-		loopKs          = &keystore.StarknetLooppSigner{StarkNet: ks}
-	)
-	for _, c := range cfgs {
-		c := c
-		ids = append(ids, *c.ChainID)
-	}
-	if len(ids) > 0 {
-		if err := starknet.EnsureChains(r.DB, starkLggr, r.Database(), ids); err != nil {
-			return nil, fmt.Errorf("failed to setup StarkNet chains: %w", err)
-		}
-	}
-
-	if cmdName := v2.EnvStarknetPluginCmd.Get(); cmdName != "" {
-		// setup the starknet relayer to be a LOOP
-		tomls, err := toml.Marshal(struct {
-			Starknet starknet.StarknetConfigs
-		}{Starknet: cfgs})
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal StarkNet configs: %w", err)
-		}
-
-		starknetCmdFn, err := plugins.NewCmdFactory(r.Register, plugins.CmdConfig{
-			ID:  starkLggr.Name(),
-			Cmd: cmdName,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create StarkNet LOOP command: %w", err)
-		}
-		// the starknet relayer service has a delicate keystore dependency. the value that is passed to NewRelayerService must
-		// be compatible with instantiating a starknet transaction manager KeystoreAdapter within the LOOPp executable.
-		starknetRelayer = loop.NewRelayerService(starkLggr, r.GRPCOpts, starknetCmdFn, string(tomls), loopKs)
-	} else {
-		// fallback to embedded chainset
-		opts := starknet.ChainSetOpts{
-			Logger:   starkLggr,
-			KeyStore: loopKs,
-			Configs:  starknet.NewConfigs(cfgs),
-		}
-		chainSet, err := starknet.NewChainSet(opts, cfgs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load StarkNet chainset: %w", err)
-		}
-		starknetRelayer = relay.NewRelayerAdapter(pkgstarknet.NewRelayer(starkLggr, chainSet), chainSet)
-	}
-	return starknetRelayer, nil
-
-}
-
 // handleNodeVersioning is a setup-time helper to encapsulate version changes and db migration
-func handleNodeVersioning(db *sqlx.DB, appLggr logger.Logger, rootDir string, cfg config.Database) error {
+func handleNodeVersioning(ctx context.Context, db *sqlx.DB, appLggr logger.Logger, rootDir string, cfg config.Database, healthReportPort uint16) error {
 	var err error
 	// Set up the versioning Configs
-	verORM := versioning.NewORM(db, appLggr, cfg.DefaultQueryTimeout())
+	verORM := versioning.NewORM(db, appLggr)
 
 	if static.Version != static.Unset {
 		var appv, dbv *semver.Version
-		appv, dbv, err = versioning.CheckVersion(db, appLggr, static.Version)
+		appv, dbv, err = versioning.CheckVersion(ctx, db, appLggr, static.Version)
 		if err != nil {
 			// Exit immediately and don't touch the database if the app version is too old
 			return fmt.Errorf("CheckVersion: %w", err)
@@ -376,11 +261,11 @@ func handleNodeVersioning(db *sqlx.DB, appLggr logger.Logger, rootDir string, cf
 		// Need to do this BEFORE migration
 		backupCfg := cfg.Backup()
 		if backupCfg.Mode() != config.DatabaseBackupModeNone && backupCfg.OnVersionUpgrade() {
-			if err = takeBackupIfVersionUpgrade(cfg.URL(), rootDir, cfg.Backup(), appLggr, appv, dbv); err != nil {
+			if err = takeBackupIfVersionUpgrade(cfg.URL(), rootDir, cfg.Backup(), appLggr, appv, dbv, healthReportPort); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					appLggr.Debugf("Failed to find any node version in the DB: %w", err)
+					appLggr.Debugf("Failed to find any node version in the DB: %v", err)
 				} else if strings.Contains(err.Error(), "relation \"node_versions\" does not exist") {
-					appLggr.Debugf("Failed to find any node version in the DB, the node_versions table does not exist yet: %w", err)
+					appLggr.Debugf("Failed to find any node version in the DB, the node_versions table does not exist yet: %v", err)
 				} else {
 					return fmt.Errorf("initializeORM#FindLatestNodeVersion: %w", err)
 				}
@@ -390,7 +275,7 @@ func handleNodeVersioning(db *sqlx.DB, appLggr logger.Logger, rootDir string, cf
 
 	// Migrate the database
 	if cfg.MigrateDatabase() {
-		if err = migrate.Migrate(db.DB, appLggr); err != nil {
+		if err = migrate.Migrate(ctx, db.DB); err != nil {
 			return fmt.Errorf("initializeORM#Migrate: %w", err)
 		}
 	}
@@ -398,14 +283,14 @@ func handleNodeVersioning(db *sqlx.DB, appLggr logger.Logger, rootDir string, cf
 	// Update to latest version
 	if static.Version != static.Unset {
 		version := versioning.NewNodeVersion(static.Version)
-		if err = verORM.UpsertNodeVersion(version); err != nil {
+		if err = verORM.UpsertNodeVersion(ctx, version); err != nil {
 			return fmt.Errorf("UpsertNodeVersion: %w", err)
 		}
 	}
 	return nil
 }
 
-func takeBackupIfVersionUpgrade(dbUrl url.URL, rootDir string, cfg periodicbackup.BackupConfig, lggr logger.Logger, appv, dbv *semver.Version) (err error) {
+func takeBackupIfVersionUpgrade(dbUrl url.URL, rootDir string, cfg periodicbackup.BackupConfig, lggr logger.Logger, appv, dbv *semver.Version, healthReportPort uint16) (err error) {
 	if appv == nil {
 		lggr.Debug("Application version is missing, skipping automatic DB backup.")
 		return nil
@@ -424,7 +309,14 @@ func takeBackupIfVersionUpgrade(dbUrl url.URL, rootDir string, cfg periodicbacku
 	if err != nil {
 		return errors.Wrap(err, "takeBackupIfVersionUpgrade failed")
 	}
-	return databaseBackup.RunBackup(appv.String())
+
+	//Because backups can take a long time we must start a "fake" health report to prevent
+	//node shutdown because of healthcheck fail/timeout
+	ibhr := services.NewInBackupHealthReport(healthReportPort, lggr)
+	ibhr.Start()
+	defer ibhr.Stop()
+	err = databaseBackup.RunBackup(appv.String())
+	return err
 }
 
 // Runner implements the Run method.
@@ -465,16 +357,16 @@ func (n ChainlinkRunner) Run(ctx context.Context, app chainlink.Application) err
 	server := server{handler: handler, lggr: app.GetLogger()}
 
 	g, gCtx := errgroup.WithContext(ctx)
-	timeoutDuration := config.WebServer().StartTimeout()
+	serverStartTimeoutDuration := config.WebServer().StartTimeout()
 	if ws.HTTPPort() != 0 {
-		go tryRunServerUntilCancelled(gCtx, app.GetLogger(), timeoutDuration, func() error {
+		go tryRunServerUntilCancelled(gCtx, app.GetLogger(), serverStartTimeoutDuration, func() error {
 			return server.run(ws.ListenIP(), ws.HTTPPort(), config.WebServer().HTTPWriteTimeout())
 		})
 	}
 
 	tls := config.WebServer().TLS()
 	if tls.HTTPSPort() != 0 {
-		go tryRunServerUntilCancelled(gCtx, app.GetLogger(), timeoutDuration, func() error {
+		go tryRunServerUntilCancelled(gCtx, app.GetLogger(), serverStartTimeoutDuration, func() error {
 			return server.runTLS(
 				tls.ListenIP(),
 				tls.HTTPSPort(),
@@ -565,20 +457,20 @@ func (s *server) run(ip net.IP, port uint16, writeTimeout time.Duration) error {
 	return errors.Wrap(err, "failed to run plaintext HTTP server")
 }
 
-func (s *server) runTLS(ip net.IP, port uint16, certFile, keyFile string, writeTimeout time.Duration) error {
+func (s *server) runTLS(ip net.IP, port uint16, certFile, keyFile string, requestTimeout time.Duration) error {
 	addr := fmt.Sprintf("%s:%d", ip.String(), port)
 	s.lggr.Infow(fmt.Sprintf("Listening and serving HTTPS on %s", addr), "ip", ip, "port", port)
-	s.tlsServer = createServer(s.handler, addr, writeTimeout)
+	s.tlsServer = createServer(s.handler, addr, requestTimeout)
 	err := s.tlsServer.ListenAndServeTLS(certFile, keyFile)
 	return errors.Wrap(err, "failed to run TLS server (NOTE: you can disable TLS server completely and silence these errors by setting WebServer.TLS.HTTPSPort=0 in your config)")
 }
 
-func createServer(handler *gin.Engine, addr string, writeTimeout time.Duration) *http.Server {
+func createServer(handler *gin.Engine, addr string, requestTimeout time.Duration) *http.Server {
 	s := &http.Server{
 		Addr:           addr,
 		Handler:        handler,
-		ReadTimeout:    5 * time.Second,
-		WriteTimeout:   writeTimeout,
+		ReadTimeout:    requestTimeout,
+		WriteTimeout:   requestTimeout,
 		IdleTimeout:    60 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -587,11 +479,11 @@ func createServer(handler *gin.Engine, addr string, writeTimeout time.Duration) 
 
 // HTTPClient encapsulates all methods used to interact with a chainlink node API.
 type HTTPClient interface {
-	Get(string, ...map[string]string) (*http.Response, error)
-	Post(string, io.Reader) (*http.Response, error)
-	Put(string, io.Reader) (*http.Response, error)
-	Patch(string, io.Reader, ...map[string]string) (*http.Response, error)
-	Delete(string) (*http.Response, error)
+	Get(context.Context, string, ...map[string]string) (*http.Response, error)
+	Post(context.Context, string, io.Reader) (*http.Response, error)
+	Put(context.Context, string, io.Reader) (*http.Response, error)
+	Patch(context.Context, string, io.Reader, ...map[string]string) (*http.Response, error)
+	Delete(context.Context, string) (*http.Response, error)
 }
 
 type authenticatedHTTPClient struct {
@@ -625,31 +517,31 @@ func newHttpClient(lggr logger.Logger, insecureSkipVerify bool) *http.Client {
 }
 
 // Get performs an HTTP Get using the authenticated HTTP client's cookie.
-func (h *authenticatedHTTPClient) Get(path string, headers ...map[string]string) (*http.Response, error) {
-	return h.doRequest("GET", path, nil, headers...)
+func (h *authenticatedHTTPClient) Get(ctx context.Context, path string, headers ...map[string]string) (*http.Response, error) {
+	return h.doRequest(ctx, "GET", path, nil, headers...)
 }
 
 // Post performs an HTTP Post using the authenticated HTTP client's cookie.
-func (h *authenticatedHTTPClient) Post(path string, body io.Reader) (*http.Response, error) {
-	return h.doRequest("POST", path, body)
+func (h *authenticatedHTTPClient) Post(ctx context.Context, path string, body io.Reader) (*http.Response, error) {
+	return h.doRequest(ctx, "POST", path, body)
 }
 
 // Put performs an HTTP Put using the authenticated HTTP client's cookie.
-func (h *authenticatedHTTPClient) Put(path string, body io.Reader) (*http.Response, error) {
-	return h.doRequest("PUT", path, body)
+func (h *authenticatedHTTPClient) Put(ctx context.Context, path string, body io.Reader) (*http.Response, error) {
+	return h.doRequest(ctx, "PUT", path, body)
 }
 
 // Patch performs an HTTP Patch using the authenticated HTTP client's cookie.
-func (h *authenticatedHTTPClient) Patch(path string, body io.Reader, headers ...map[string]string) (*http.Response, error) {
-	return h.doRequest("PATCH", path, body, headers...)
+func (h *authenticatedHTTPClient) Patch(ctx context.Context, path string, body io.Reader, headers ...map[string]string) (*http.Response, error) {
+	return h.doRequest(ctx, "PATCH", path, body, headers...)
 }
 
 // Delete performs an HTTP Delete using the authenticated HTTP client's cookie.
-func (h *authenticatedHTTPClient) Delete(path string) (*http.Response, error) {
-	return h.doRequest("DELETE", path, nil)
+func (h *authenticatedHTTPClient) Delete(ctx context.Context, path string) (*http.Response, error) {
+	return h.doRequest(ctx, "DELETE", path, nil)
 }
 
-func (h *authenticatedHTTPClient) doRequest(verb, path string, body io.Reader, headerArgs ...map[string]string) (*http.Response, error) {
+func (h *authenticatedHTTPClient) doRequest(ctx context.Context, verb, path string, body io.Reader, headerArgs ...map[string]string) (*http.Response, error) {
 	var headers map[string]string
 	if len(headerArgs) > 0 {
 		headers = headerArgs[0]
@@ -657,7 +549,7 @@ func (h *authenticatedHTTPClient) doRequest(verb, path string, body io.Reader, h
 		headers = map[string]string{}
 	}
 
-	request, err := http.NewRequest(verb, h.remoteNodeURL.String()+path, body)
+	request, err := http.NewRequestWithContext(ctx, verb, h.remoteNodeURL.String()+path, body)
 	if err != nil {
 		return nil, err
 	}
@@ -679,7 +571,7 @@ func (h *authenticatedHTTPClient) doRequest(verb, path string, body io.Reader, h
 	}
 	if response.StatusCode == http.StatusUnauthorized && (h.sessionRequest.Email != "" || h.sessionRequest.Password != "") {
 		var cookieerr error
-		cookie, cookieerr = h.cookieAuth.Authenticate(h.sessionRequest)
+		cookie, cookieerr = h.cookieAuth.Authenticate(ctx, h.sessionRequest)
 		if cookieerr != nil {
 			return response, err
 		}
@@ -697,7 +589,7 @@ func (h *authenticatedHTTPClient) doRequest(verb, path string, body io.Reader, h
 // future HTTP requests.
 type CookieAuthenticator interface {
 	Cookie() (*http.Cookie, error)
-	Authenticate(sessions.SessionRequest) (*http.Cookie, error)
+	Authenticate(context.Context, sessions.SessionRequest) (*http.Cookie, error)
 	Logout() error
 }
 
@@ -726,14 +618,14 @@ func (t *SessionCookieAuthenticator) Cookie() (*http.Cookie, error) {
 }
 
 // Authenticate retrieves a session ID via a cookie and saves it to disk.
-func (t *SessionCookieAuthenticator) Authenticate(sessionRequest sessions.SessionRequest) (*http.Cookie, error) {
+func (t *SessionCookieAuthenticator) Authenticate(ctx context.Context, sessionRequest sessions.SessionRequest) (*http.Cookie, error) {
 	b := new(bytes.Buffer)
 	err := json.NewEncoder(b).Encode(sessionRequest)
 	if err != nil {
 		return nil, err
 	}
 	url := t.config.RemoteNodeURL.String() + "/sessions"
-	req, err := http.NewRequest("POST", url, b)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, b)
 	if err != nil {
 		return nil, err
 	}
@@ -900,8 +792,8 @@ func (f *fileSessionRequestBuilder) Build(file string) (sessions.SessionRequest,
 // APIInitializer is the interface used to create the API User credentials
 // needed to access the API. Does nothing if API user already exists.
 type APIInitializer interface {
-	// Initialize creates a new user for API access, or does nothing if one exists.
-	Initialize(orm sessions.ORM, lggr logger.Logger) (sessions.User, error)
+	// Initialize creates a new local Admin user for API access, or does nothing if one exists.
+	Initialize(ctx context.Context, orm sessions.BasicAdminUsersORM, lggr logger.Logger) (sessions.User, error)
 }
 
 type promptingAPIInitializer struct {
@@ -915,11 +807,11 @@ func NewPromptingAPIInitializer(prompter Prompter) APIInitializer {
 }
 
 // Initialize uses the terminal to get credentials that it then saves in the store.
-func (t *promptingAPIInitializer) Initialize(orm sessions.ORM, lggr logger.Logger) (sessions.User, error) {
+func (t *promptingAPIInitializer) Initialize(ctx context.Context, orm sessions.BasicAdminUsersORM, lggr logger.Logger) (sessions.User, error) {
 	// Load list of users to determine which to assume, or if a user needs to be created
-	dbUsers, err := orm.ListUsers()
+	dbUsers, err := orm.ListUsers(ctx)
 	if err != nil {
-		return sessions.User{}, err
+		return sessions.User{}, errors.Wrap(err, "Unable to List users for initialization")
 	}
 
 	// If there are no users in the database, prompt for initial admin user creation
@@ -937,8 +829,8 @@ func (t *promptingAPIInitializer) Initialize(orm sessions.ORM, lggr logger.Logge
 				lggr.Errorw("Error creating API user", "err", err2)
 				continue
 			}
-			if err = orm.CreateUser(&user); err != nil {
-				lggr.Errorf("Error creating API user: ", err, "err")
+			if err = orm.CreateUser(ctx, &user); err != nil {
+				lggr.Errorw("Error creating API user", "err", err)
 			}
 			return user, err
 		}
@@ -951,7 +843,7 @@ func (t *promptingAPIInitializer) Initialize(orm sessions.ORM, lggr logger.Logge
 
 	// Otherwise, multiple admin users exist, prompt for which to use
 	email := t.prompter.Prompt("Enter email of API user account to assume: ")
-	user, err := orm.FindUser(email)
+	user, err := orm.FindUser(ctx, email)
 
 	if err != nil {
 		return sessions.User{}, err
@@ -969,16 +861,16 @@ func NewFileAPIInitializer(file string) APIInitializer {
 	return fileAPIInitializer{file: file}
 }
 
-func (f fileAPIInitializer) Initialize(orm sessions.ORM, lggr logger.Logger) (sessions.User, error) {
+func (f fileAPIInitializer) Initialize(ctx context.Context, orm sessions.BasicAdminUsersORM, lggr logger.Logger) (sessions.User, error) {
 	request, err := credentialsFromFile(f.file, lggr)
 	if err != nil {
 		return sessions.User{}, err
 	}
 
 	// Load list of users to determine which to assume, or if a user needs to be created
-	dbUsers, err := orm.ListUsers()
+	dbUsers, err := orm.ListUsers(ctx)
 	if err != nil {
-		return sessions.User{}, err
+		return sessions.User{}, errors.Wrap(err, "Unable to List users for initialization")
 	}
 
 	// If there are no users in the database, create initial admin user from session request from file creds
@@ -987,7 +879,7 @@ func (f fileAPIInitializer) Initialize(orm sessions.ORM, lggr logger.Logger) (se
 		if err2 != nil {
 			return user, errors.Wrap(err2, "failed to instantiate new user")
 		}
-		return user, orm.CreateUser(&user)
+		return user, orm.CreateUser(ctx, &user)
 	}
 
 	// Attempt to contextually return the correct admin user, CLI access here implies admin
@@ -996,7 +888,7 @@ func (f fileAPIInitializer) Initialize(orm sessions.ORM, lggr logger.Logger) (se
 	}
 
 	// Otherwise, multiple admin users exist, attempt to load email specified in session request
-	user, err := orm.FindUser(request.Email)
+	user, err := orm.FindUser(ctx, request.Email)
 	if err != nil {
 		return sessions.User{}, err
 	}
@@ -1131,8 +1023,7 @@ func confirmAction(c *cli.Context) bool {
 			return true
 		} else if answer == "no" {
 			return false
-		} else {
-			fmt.Printf("%s is not valid. Please type yes or no\n", answer)
 		}
+		fmt.Printf("%s is not valid. Please type yes or no\n", answer)
 	}
 }

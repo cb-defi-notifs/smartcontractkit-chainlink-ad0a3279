@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -8,13 +9,18 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/require"
 
-	v2 "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/v2"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/smartcontractkit/chainlink-common/pkg/loop"
+	commontypes "github.com/smartcontractkit/chainlink-common/pkg/types"
+
+	evmtoml "github.com/smartcontractkit/chainlink/v2/core/chains/evm/config/toml"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
+	chainlinkmocks "github.com/smartcontractkit/chainlink/v2/core/services/chainlink/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/web/testutils"
 )
 
 func TestResolver_Chains(t *testing.T) {
 	var (
-		chainID = *utils.NewBigI(1)
+		chainID = *big.NewI(1)
 		query   = `
 			query GetChains {
 				chains {
@@ -40,6 +46,8 @@ LinkContractAddress = '0x538aAaB4ea120b2bC2fe5D296852D948F07D849e'
 LogBackfillBatchSize = 17
 LogPollInterval = '1m0s'
 LogKeepBlocksDepth = 100000
+LogPrunePageSize = 0
+BackupLogPollerBlockDelay = 100
 MinIncomingConfirmations = 13
 MinContractPayment = '9.223372036854775807 link'
 NonceAutoSync = true
@@ -58,7 +66,7 @@ ReaperThreshold = '1m0s'
 ResendAfterThreshold = '1h0m0s'
 `
 	)
-	var chain v2.EVMConfig
+	var chain evmtoml.EVMConfig
 	err := toml.Unmarshal([]byte(configTOML), &chain)
 	require.NoError(t, err)
 
@@ -69,14 +77,23 @@ ResendAfterThreshold = '1h0m0s'
 		{
 			name:          "success",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
-				f.App.On("EVMORM").Return(f.Mocks.evmORM)
-
-				f.Mocks.evmORM.PutChains(v2.EVMConfig{
+			before: func(ctx context.Context, f *gqlTestFramework) {
+				chainConf := evmtoml.EVMConfig{
 					ChainID: &chainID,
 					Enabled: chain.Enabled,
 					Chain:   chain.Chain,
-				})
+				}
+
+				chainConfToml, err2 := chainConf.TOMLString()
+				require.NoError(t, err2)
+
+				f.App.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: []loop.Relayer{
+					testutils.MockRelayer{ChainStatus: commontypes.ChainStatus{
+						ID:      chainID.String(),
+						Enabled: *chain.Enabled,
+						Config:  chainConfToml,
+					}},
+				}})
 			},
 			query: query,
 			result: fmt.Sprintf(`
@@ -93,6 +110,24 @@ ResendAfterThreshold = '1h0m0s'
 				}
 			}`, configTOMLEscaped),
 		},
+		unauthorizedTestCase(GQLTestCase{query: query}, "chains"),
+		{
+			name:          "no chains",
+			authenticated: true,
+			before: func(ctx context.Context, f *gqlTestFramework) {
+				f.App.On("GetRelayers").Return(&chainlinkmocks.FakeRelayerChainInteroperators{Relayers: []loop.Relayer{}})
+			},
+			query: query,
+			result: `
+			{
+				"chains": {
+					"results": [],
+					"metadata": {
+						"total": 0
+					}
+				}
+			}`,
+		},
 	}
 
 	RunGQLTests(t, testCases)
@@ -100,7 +135,7 @@ ResendAfterThreshold = '1h0m0s'
 
 func TestResolver_Chain(t *testing.T) {
 	var (
-		chainID = *utils.NewBigI(1)
+		chainID = *big.NewI(1)
 		query   = `
 			query GetChain {
 				chain(id: "1") {
@@ -127,6 +162,8 @@ LinkContractAddress = '0x538aAaB4ea120b2bC2fe5D296852D948F07D849e'
 LogBackfillBatchSize = 17
 LogPollInterval = '1m0s'
 LogKeepBlocksDepth = 100000
+LogPrunePageSize = 0
+BackupLogPollerBlockDelay = 100
 MinIncomingConfirmations = 13
 MinContractPayment = '9.223372036854775807 link'
 NonceAutoSync = true
@@ -145,7 +182,7 @@ ReaperThreshold = '1m0s'
 ResendAfterThreshold = '1h0m0s'
 `
 	)
-	var chain v2.Chain
+	var chain evmtoml.Chain
 	err := toml.Unmarshal([]byte(configTOML), &chain)
 	require.NoError(t, err)
 
@@ -156,9 +193,9 @@ ResendAfterThreshold = '1h0m0s'
 		{
 			name:          "success",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.App.On("EVMORM").Return(f.Mocks.evmORM)
-				f.Mocks.evmORM.PutChains(v2.EVMConfig{
+				f.Mocks.evmORM.PutChains(evmtoml.EVMConfig{
 					ChainID: &chainID,
 					Chain:   chain,
 				})
@@ -176,7 +213,7 @@ ResendAfterThreshold = '1h0m0s'
 		{
 			name:          "not found error",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				f.App.On("EVMORM").Return(f.Mocks.evmORM)
 			},
 			query: query,

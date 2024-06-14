@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
 	confighelper2 "github.com/smartcontractkit/libocr/offchainreporting2plus/confighelper"
@@ -16,17 +15,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/umbracle/ethgo/abi"
 
+	evmutils "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 func TestMercuryConfigPoller(t *testing.T) {
-	feedID := utils.NewHash()
+	feedID := evmutils.NewHash()
 	feedIDBytes := [32]byte(feedID)
 
 	th := SetupTH(t, feedID)
-	th.subscription.On("Events").Return(nil)
 
 	notify := th.configPoller.Notify()
 	assert.Empty(t, notify)
@@ -42,12 +40,12 @@ func TestMercuryConfigPoller(t *testing.T) {
 	for i := 0; i < n; i++ {
 		oracles = append(oracles, confighelper2.OracleIdentityExtra{
 			OracleIdentity: confighelper2.OracleIdentity{
-				OnchainPublicKey:  utils.RandomAddress().Bytes(),
-				TransmitAccount:   ocrtypes2.Account(utils.RandomAddress().String()),
-				OffchainPublicKey: utils.RandomBytes32(),
+				OnchainPublicKey:  evmutils.RandomAddress().Bytes(),
+				TransmitAccount:   ocrtypes2.Account(evmutils.RandomAddress().String()),
+				OffchainPublicKey: evmutils.RandomBytes32(),
 				PeerID:            utils.MustNewPeerID(),
 			},
-			ConfigEncryptionPublicKey: utils.RandomBytes32(),
+			ConfigEncryptionPublicKey: evmutils.RandomBytes32(),
 		})
 	}
 	f := uint8(1)
@@ -82,7 +80,8 @@ func TestMercuryConfigPoller(t *testing.T) {
 		offchainTransmitters[i] = oracles[i].OffchainPublicKey
 		encodedTransmitter[i] = ocrtypes2.Account(fmt.Sprintf("%x", oracles[i].OffchainPublicKey[:]))
 	}
-	_, err = th.verifierContract.SetConfig(th.user, feedIDBytes, signerAddresses, offchainTransmitters, f, onchainConfig, offchainConfigVersion, offchainConfig)
+
+	_, err = th.verifierContract.SetConfig(th.user, feedIDBytes, signerAddresses, offchainTransmitters, f, onchainConfig, offchainConfigVersion, offchainConfig, nil)
 	require.NoError(t, err, "failed to setConfig with feed ID")
 	th.backend.Commit()
 
@@ -111,48 +110,6 @@ func TestMercuryConfigPoller(t *testing.T) {
 	assert.Equal(t, encodedTransmitter, newConfig.Transmitters)
 	assert.Equal(t, offchainConfigVersion, newConfig.OffchainConfigVersion)
 	assert.Equal(t, offchainConfig, newConfig.OffchainConfig)
-}
-
-func TestNotify(t *testing.T) {
-	feedIDStr := "8257737fdf4f79639585fd0ed01bea93c248a9ad940e98dd27f41c9b6230fed1"
-	feedIDBytes, err := hexutil.Decode("0x" + feedIDStr)
-	require.NoError(t, err)
-	feedID := common.BytesToHash(feedIDBytes)
-
-	eventCh := make(chan pg.Event)
-
-	th := SetupTH(t, feedID)
-	th.subscription.On("Events").Return((<-chan pg.Event)(eventCh))
-
-	notify := th.configPoller.Notify()
-	assert.Empty(t, notify)
-
-	eventCh <- pg.Event{} // Empty event
-	assert.Empty(t, notify)
-
-	eventCh <- pg.Event{Payload: "address"} // missing topic values
-	assert.Empty(t, notify)
-
-	eventCh <- pg.Event{Payload: "address:val1"} // missing feedId topic value
-	assert.Empty(t, notify)
-
-	eventCh <- pg.Event{Payload: "address:8257737fdf4f79639585fd0ed01bea93c248a9ad940e98dd27f41c9b6230fed1,val2"} // wrong index
-	assert.Empty(t, notify)
-
-	eventCh <- pg.Event{Payload: "address:val1,val2,8257737fdf4f79639585fd0ed01bea93c248a9ad940e98dd27f41c9b6230fed1"} // wrong index
-	assert.Empty(t, notify)
-
-	eventCh <- pg.Event{Payload: "address:val1,0x8257737fdf4f79639585fd0ed01bea93c248a9ad940e98dd27f41c9b6230fed1"} // 0x prefix
-	assert.Empty(t, notify)
-
-	eventCh <- pg.Event{Payload: "address:val1,8257737fdf4f79639585fd0ed01bea93c248a9ad940e98dd27f41c9b6230fed1"}
-	assert.Eventually(t, func() bool { <-notify; return true }, time.Second, 10*time.Millisecond)
-
-	eventCh <- pg.Event{Payload: "address:val1,8257737fdf4f79639585fd0ed01bea93c248a9ad940e98dd27f41c9b6230fed1"} // try second time
-	assert.Eventually(t, func() bool { <-notify; return true }, time.Second, 10*time.Millisecond)
-
-	eventCh <- pg.Event{Payload: "address:val1,8257737fdf4f79639585fd0ed01bea93c248a9ad940e98dd27f41c9b6230fed1:additional"}
-	assert.Eventually(t, func() bool { <-notify; return true }, time.Second, 10*time.Millisecond)
 }
 
 func onchainPublicKeyToAddress(publicKeys []types.OnchainPublicKey) (addresses []common.Address, err error) {

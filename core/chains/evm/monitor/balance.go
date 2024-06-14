@@ -9,18 +9,19 @@ import (
 	"time"
 
 	gethCommon "github.com/ethereum/go-ethereum/common"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/services"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils"
+
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
 	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
 	httypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/headtracker/types"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/keystore"
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	"github.com/smartcontractkit/chainlink/v2/core/services"
-	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 //go:generate mockery --quiet --name BalanceMonitor --output ../mocks/ --case=underscore
@@ -29,11 +30,11 @@ type (
 	BalanceMonitor interface {
 		httypes.HeadTrackable
 		GetEthBalance(gethCommon.Address) *assets.Eth
-		services.ServiceCtx
+		services.Service
 	}
 
 	balanceMonitor struct {
-		utils.StartStopOnce
+		services.StateMachine
 		logger         logger.Logger
 		ethClient      evmclient.Client
 		chainID        *big.Int
@@ -41,18 +42,20 @@ type (
 		ethKeyStore    keystore.Eth
 		ethBalances    map[gethCommon.Address]*assets.Eth
 		ethBalancesMtx *sync.RWMutex
-		sleeperTask    utils.SleeperTask
+		sleeperTask    *utils.SleeperTask
 	}
 
 	NullBalanceMonitor struct{}
 )
 
+var _ BalanceMonitor = (*balanceMonitor)(nil)
+
 // NewBalanceMonitor returns a new balanceMonitor
-func NewBalanceMonitor(ethClient evmclient.Client, ethKeyStore keystore.Eth, logger logger.Logger) BalanceMonitor {
+func NewBalanceMonitor(ethClient evmclient.Client, ethKeyStore keystore.Eth, lggr logger.Logger) *balanceMonitor {
 	chainId := ethClient.ConfiguredChainID()
 	bm := &balanceMonitor{
-		utils.StartStopOnce{},
-		logger,
+		services.StateMachine{},
+		logger.Named(lggr, "BalanceMonitor"),
 		ethClient,
 		chainId,
 		chainId.String(),
@@ -89,7 +92,7 @@ func (bm *balanceMonitor) Name() string {
 }
 
 func (bm *balanceMonitor) HealthReport() map[string]error {
-	return map[string]error{bm.Name(): bm.StartStopOnce.Healthy()}
+	return map[string]error{bm.Name(): bm.Healthy()}
 }
 
 // OnNewLongestChain checks the balance for each key
@@ -100,7 +103,6 @@ func (bm *balanceMonitor) OnNewLongestChain(_ context.Context, head *evmtypes.He
 	if !ok {
 		bm.logger.Debugw("BalanceMonitor: ignoring OnNewLongestChain call, balance monitor is not started", "state", bm.State())
 	}
-
 }
 
 func (bm *balanceMonitor) checkBalance(head *evmtypes.Head) {
@@ -116,7 +118,8 @@ func (bm *balanceMonitor) updateBalance(ethBal assets.Eth, address gethCommon.Ad
 	bm.ethBalances[address] = &ethBal
 	bm.ethBalancesMtx.Unlock()
 
-	lgr := bm.logger.Named("balance_log").With(
+	lgr := logger.Named(bm.logger, "BalanceLog")
+	lgr = logger.With(lgr,
 		"address", address.Hex(),
 		"ethBalance", ethBal.String(),
 		"weiBalance", ethBal.ToInt())
@@ -170,7 +173,7 @@ func (w *worker) Work() {
 }
 
 func (w *worker) WorkCtx(ctx context.Context) {
-	enabledAddresses, err := w.bm.ethKeyStore.EnabledAddressesForChain(w.bm.chainID)
+	enabledAddresses, err := w.bm.ethKeyStore.EnabledAddressesForChain(ctx, w.bm.chainID)
 	if err != nil {
 		w.bm.logger.Error("BalanceMonitor: error getting keys", err)
 	}
@@ -227,7 +230,7 @@ func ApproximateFloat64(e *assets.Eth) (float64, error) {
 	bf := new(big.Float).Quo(ef, weif)
 	f64, _ := bf.Float64()
 	if f64 == math.Inf(1) || f64 == math.Inf(-1) {
-		return math.Inf(1), errors.New("assets.Eth.Float64: Could not approximate Eth value into float")
+		return math.Inf(1), pkgerrors.New("assets.Eth.Float64: Could not approximate Eth value into float")
 	}
 	return f64, nil
 }

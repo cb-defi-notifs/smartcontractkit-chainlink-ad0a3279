@@ -1,17 +1,16 @@
 package config
 
 import (
-	"math/big"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"go.uber.org/zap/zapcore"
 )
 
 // nolint
 var (
-	ErrEnvUnset = errors.New("env var unset")
+	ErrEnvUnset = pkgerrors.New("env var unset")
 )
 
 type LogfFn func(string, ...any)
@@ -21,7 +20,6 @@ type AppConfig interface {
 	RootDir() string
 	ShutdownGracePeriod() time.Duration
 	InsecureFastScrypt() bool
-	DefaultChainID() *big.Int
 	EVMEnabled() bool
 	EVMRPCEnabled() bool
 	CosmosEnabled() bool
@@ -30,15 +28,15 @@ type AppConfig interface {
 
 	Validate() error
 	ValidateDB() error
-	LogConfiguration(log LogfFn)
+	LogConfiguration(log, warn LogfFn)
 	SetLogLevel(lvl zapcore.Level) error
 	SetLogSQL(logSQL bool)
 	SetPasswords(keystore, vrf *string)
 
 	AuditLogger() AuditLogger
 	AutoPprof() AutoPprof
+	Capabilities() Capabilities
 	Database() Database
-	Explorer() Explorer
 	Feature() Feature
 	FluxMonitor() FluxMonitor
 	Insecure() Insecure
@@ -56,6 +54,7 @@ type AppConfig interface {
 	TelemetryIngress() TelemetryIngress
 	Threshold() Threshold
 	WebServer() WebServer
+	Tracing() Tracing
 }
 
 type DatabaseBackupMode string

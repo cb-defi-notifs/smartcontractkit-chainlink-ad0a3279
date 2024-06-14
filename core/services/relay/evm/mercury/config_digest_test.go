@@ -18,7 +18,7 @@ import (
 	"github.com/smartcontractkit/wsrpc/credentials"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/mercury_exposed_verifier"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/llo-feeds/generated/exposed_verifier"
 )
 
 // Adapted from: https://github.com/smartcontractkit/offchain-reporting/blob/991ebe1462fd56826a1ddfb34287d542acb2baee/lib/offchainreporting2/chains/evmutil/config_digest_test.go
@@ -32,7 +32,7 @@ func TestConfigCalculationMatches(t *testing.T) {
 		core.GenesisAlloc{owner.From: {Balance: new(big.Int).Lsh(big.NewInt(1), 60)}},
 		ethconfig.Defaults.Miner.GasCeil,
 	)
-	_, _, eoa, err := mercury_exposed_verifier.DeployMercuryExposedVerifier(
+	_, _, eoa, err := exposed_verifier.DeployExposedVerifier(
 		owner, backend,
 	)
 	backend.Commit()
@@ -51,9 +51,10 @@ func TestConfigCalculationMatches(t *testing.T) {
 			offchainConfigVersion uint64,
 			offchainConfig []byte,
 		) bool {
+			chainIDBig := new(big.Int).SetUint64(chainID)
 			golangDigest := configDigest(
 				feedID,
-				chainID,
+				chainIDBig,
 				contractAddress,
 				configCount,
 				oracles,
@@ -106,7 +107,7 @@ func GenHash(t *testing.T) gopter.Gen {
 			array, ok := byteArray.(*gopter.GenResult).Retrieve()
 			require.True(t, ok, "failed to retrieve gen result")
 			for i, byteVal := range array.([]interface{}) {
-				rv[i] = byte(byteVal.(uint8))
+				rv[i] = byteVal.(uint8)
 			}
 			return rv
 		},
@@ -198,7 +199,7 @@ func GenBytes(t *testing.T) gopter.Gen {
 					iArray := array.([]interface{})
 					rv := make([]byte, len(iArray))
 					for i, byteVal := range iArray {
-						rv[i] = byte(byteVal.(uint8))
+						rv[i] = byteVal.(uint8)
 					}
 					return rv
 				},

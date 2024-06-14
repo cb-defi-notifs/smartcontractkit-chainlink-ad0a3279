@@ -10,13 +10,12 @@ import (
 	"github.com/graph-gophers/graphql-go"
 	"github.com/pkg/errors"
 
-	"github.com/smartcontractkit/chainlink-relay/pkg/types"
-
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
 	"github.com/smartcontractkit/chainlink/v2/core/bridges"
 	"github.com/smartcontractkit/chainlink/v2/core/chains"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/vrfkey"
+	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/utils/stringutils"
 )
 
@@ -31,7 +30,7 @@ func (r *Resolver) Bridge(ctx context.Context, args struct{ ID graphql.ID }) (*B
 		return nil, err
 	}
 
-	bridge, err := r.App.BridgeORM().FindBridge(name)
+	bridge, err := r.App.BridgeORM().FindBridge(ctx, name)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewBridgePayload(bridge, err), nil
@@ -55,7 +54,7 @@ func (r *Resolver) Bridges(ctx context.Context, args struct {
 	offset := pageOffset(args.Offset)
 	limit := pageLimit(args.Limit)
 
-	brdgs, count, err := r.App.BridgeORM().BridgeTypes(offset, limit)
+	brdgs, count, err := r.App.BridgeORM().BridgeTypes(ctx, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +68,7 @@ func (r *Resolver) Chain(ctx context.Context, args struct{ ID graphql.ID }) (*Ch
 		return nil, err
 	}
 
-	cs, _, err := r.App.EVMORM().Chains(0, -1, string(args.ID))
+	cs, _, err := r.App.EVMORM().Chains(string(args.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -95,12 +94,31 @@ func (r *Resolver) Chains(ctx context.Context, args struct {
 	offset := pageOffset(args.Offset)
 	limit := pageLimit(args.Limit)
 
-	page, count, err := r.App.EVMORM().Chains(offset, limit)
-	if err != nil {
-		return nil, err
+	var chains []types.ChainStatus
+	for _, rel := range r.App.GetRelayers().Slice() {
+		status, err := rel.GetChainStatus(ctx)
+		if err != nil {
+			return nil, err
+		}
+		chains = append(chains, status)
+	}
+	count := len(chains)
+
+	if count == 0 {
+		//No chains are configured, return an empty ChainsPayload, so we don't break the UI
+		return NewChainsPayload(nil, 0), nil
 	}
 
-	return NewChainsPayload(page, int32(count)), nil
+	// bound the chain results
+	if offset >= len(chains) {
+		return nil, fmt.Errorf("offset %d out of range", offset)
+	}
+	end := len(chains)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+
+	return NewChainsPayload(chains[offset:end], int32(count)), nil
 }
 
 // FeedsManager retrieves a feeds manager by id.
@@ -114,7 +132,7 @@ func (r *Resolver) FeedsManager(ctx context.Context, args struct{ ID graphql.ID 
 		return nil, err
 	}
 
-	mgr, err := r.App.GetFeedsService().GetManager(id)
+	mgr, err := r.App.GetFeedsService().GetManager(ctx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewFeedsManagerPayload(nil, err), nil
@@ -131,7 +149,7 @@ func (r *Resolver) FeedsManagers(ctx context.Context) (*FeedsManagersPayloadReso
 		return nil, err
 	}
 
-	mgrs, err := r.App.GetFeedsService().ListManagers()
+	mgrs, err := r.App.GetFeedsService().ListManagers(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -150,11 +168,15 @@ func (r *Resolver) Job(ctx context.Context, args struct{ ID graphql.ID }) (*JobP
 		return nil, err
 	}
 
-	j, err := r.App.JobORM().FindJobWithoutSpecErrors(id)
+	j, err := r.App.JobORM().FindJobWithoutSpecErrors(ctx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewJobPayload(r.App, nil, err), nil
+		}
 
+		//We still need to show the job in UI/CLI even if the chain id is disabled
+		if errors.Is(err, chains.ErrNoSuchChainID) {
+			return NewJobPayload(r.App, &j, err), nil
 		}
 
 		return nil, err
@@ -175,7 +197,7 @@ func (r *Resolver) Jobs(ctx context.Context, args struct {
 	offset := pageOffset(args.Offset)
 	limit := pageLimit(args.Limit)
 
-	jobs, count, err := r.App.JobORM().FindJobs(offset, limit)
+	jobs, count, err := r.App.JobORM().FindJobs(ctx, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -223,25 +245,28 @@ func (r *Resolver) Node(ctx context.Context, args struct{ ID graphql.ID }) (*Nod
 	if err := authenticateUser(ctx); err != nil {
 		return nil, err
 	}
-
+	r.App.GetLogger().Debug("resolver Node args %v", args)
 	name := string(args.ID)
-	node, err := r.App.EVMORM().NodeStatus(name)
-	if err != nil {
-		if errors.Is(err, chains.ErrNotFound) {
-			npr, warn := NewNodePayloadResolver(nil, err)
-			if warn != nil {
-				r.App.GetLogger().Warnw("Error creating NodePayloadResolver", "name", name, "err", warn)
-			}
-			return npr, nil
+	r.App.GetLogger().Debug("resolver Node name %s", name)
+
+	for _, relayer := range r.App.GetRelayers().Slice() {
+		statuses, _, _, err := relayer.ListNodeStatuses(ctx, 0, "")
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
+		for i, s := range statuses {
+			if s.Name == name {
+				npr, err2 := NewNodePayloadResolver(&statuses[i], nil)
+				if err2 != nil {
+					return nil, err2
+				}
+				return npr, nil
+			}
+		}
 	}
 
-	npr, warn := NewNodePayloadResolver(&node, nil)
-	if warn != nil {
-		r.App.GetLogger().Warnw("Error creating NodePayloadResolver", "name", name, "err", warn)
-	}
-	return npr, nil
+	r.App.GetLogger().Errorw("resolver getting node status", "err", chains.ErrNotFound)
+	return NewNodePayloadResolver(nil, chains.ErrNotFound)
 }
 
 func (r *Resolver) P2PKeys(ctx context.Context) (*P2PKeysPayloadResolver, error) {
@@ -303,7 +328,7 @@ func (r *Resolver) JobProposal(ctx context.Context, args struct {
 		return nil, err
 	}
 
-	jp, err := r.App.GetFeedsService().GetJobProposal(id)
+	jp, err := r.App.GetFeedsService().GetJobProposal(ctx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewJobProposalPayload(nil, err), nil
@@ -326,13 +351,15 @@ func (r *Resolver) Nodes(ctx context.Context, args struct {
 
 	offset := pageOffset(args.Offset)
 	limit := pageLimit(args.Limit)
+	r.App.GetLogger().Debugw("resolver Nodes query", "offset", offset, "limit", limit)
+	allNodes, total, err := r.App.GetRelayers().NodeStatuses(ctx, offset, limit)
+	r.App.GetLogger().Debugw("resolver Nodes query result", "nodes", allNodes, "total", total, "err", err)
 
-	nodes, count, err := r.App.GetChains().EVM.NodeStatuses(ctx, offset, limit)
 	if err != nil {
+		r.App.GetLogger().Errorw("Error creating get nodes status from app", "err", err)
 		return nil, err
 	}
-
-	npr, warn := NewNodesPayload(nodes, int32(count))
+	npr, warn := NewNodesPayload(allNodes, int32(total))
 	if warn != nil {
 		r.App.GetLogger().Warnw("Error creating NodesPayloadResolver", "err", warn)
 	}
@@ -350,7 +377,7 @@ func (r *Resolver) JobRuns(ctx context.Context, args struct {
 	limit := pageLimit(args.Limit)
 	offset := pageOffset(args.Offset)
 
-	runs, count, err := r.App.JobORM().PipelineRuns(nil, offset, limit)
+	runs, count, err := r.App.JobORM().PipelineRuns(ctx, nil, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +397,7 @@ func (r *Resolver) JobRun(ctx context.Context, args struct {
 		return nil, err
 	}
 
-	jr, err := r.App.JobORM().FindPipelineRunByID(id)
+	jr, err := r.App.JobORM().FindPipelineRunByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewJobRunPayload(nil, r.App, err), nil
@@ -389,12 +416,12 @@ func (r *Resolver) ETHKeys(ctx context.Context) (*ETHKeysPayloadResolver, error)
 
 	ks := r.App.GetKeyStore().Eth()
 
-	keys, err := ks.GetAll()
+	keys, err := ks.GetAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error getting unlocked keys: %v", err)
 	}
 
-	states, err := ks.GetStatesForKeys(keys)
+	states, err := ks.GetStatesForKeys(ctx, keys)
 	if err != nil {
 		return nil, fmt.Errorf("error getting key states: %v", err)
 	}
@@ -402,13 +429,13 @@ func (r *Resolver) ETHKeys(ctx context.Context) (*ETHKeysPayloadResolver, error)
 	var ethKeys []ETHKey
 
 	for _, state := range states {
-		k, err := ks.Get(state.Address.Hex())
+		k, err := ks.Get(ctx, state.Address.Hex())
 		if err != nil {
 			return nil, err
 		}
 
-		chain, err := r.App.GetChains().EVM.Get(state.EVMChainID.ToInt())
-		if errors.Is(errors.Cause(err), evm.ErrNoChains) {
+		chain, err := r.App.GetRelayers().LegacyEVMChains().Get(state.EVMChainID.String())
+		if errors.Is(errors.Cause(err), evmrelay.ErrNoChains) {
 			ethKeys = append(ethKeys, ETHKey{
 				addr:  k.EIP55Address,
 				state: state,
@@ -452,7 +479,7 @@ func (r *Resolver) EthTransaction(ctx context.Context, args struct {
 	}
 
 	hash := common.HexToHash(string(args.Hash))
-	etx, err := r.App.TxmStorageService().FindTxByHash(hash)
+	etx, err := r.App.TxmStorageService().FindTxByHash(ctx, hash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewEthTransactionPayload(nil, err), nil
@@ -475,7 +502,7 @@ func (r *Resolver) EthTransactions(ctx context.Context, args struct {
 	offset := pageOffset(args.Offset)
 	limit := pageLimit(args.Limit)
 
-	txs, count, err := r.App.TxmStorageService().Transactions(offset, limit)
+	txs, count, err := r.App.TxmStorageService().Transactions(ctx, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +521,7 @@ func (r *Resolver) EthTransactionsAttempts(ctx context.Context, args struct {
 	offset := pageOffset(args.Offset)
 	limit := pageLimit(args.Limit)
 
-	attempts, count, err := r.App.TxmStorageService().TxAttempts(offset, limit)
+	attempts, count, err := r.App.TxmStorageService().TxAttempts(ctx, offset, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,6 @@
 package actions
 
 import (
-	"context"
 	"math/big"
 	"testing"
 
@@ -12,13 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils"
+	"github.com/smartcontractkit/chainlink-testing-framework/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
 	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/operator_factory"
 
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 )
 
+// Deprecated: we are moving away from blockchain.EVMClient, use actions_seth.DeployForwarderContracts
 func DeployForwarderContracts(
 	t *testing.T,
 	contractDeployer contracts.ContractDeployer,
@@ -49,6 +50,7 @@ func DeployForwarderContracts(
 	return operators, authorizedForwarders, operatorFactoryInstance
 }
 
+// Deprecated: we are moving away from blockchain.EVMClient, use actions_seth.AcceptAuthorizedReceiversOperator
 func AcceptAuthorizedReceiversOperator(
 	t *testing.T,
 	operator common.Address,
@@ -67,7 +69,7 @@ func AcceptAuthorizedReceiversOperator(
 	err = chainClient.WaitForEvents()
 	require.NoError(t, err, "Waiting for events in nodes shouldn't fail")
 
-	senders, err := forwarderInstance.GetAuthorizedSenders(context.Background())
+	senders, err := forwarderInstance.GetAuthorizedSenders(testcontext.Get(t))
 	require.NoError(t, err, "Getting authorized senders shouldn't fail")
 	var nodesAddrs []string
 	for _, o := range nodeAddresses {
@@ -75,23 +77,21 @@ func AcceptAuthorizedReceiversOperator(
 	}
 	require.Equal(t, nodesAddrs, senders, "Senders addresses should match node addresses")
 
-	owner, err := forwarderInstance.Owner(context.Background())
+	owner, err := forwarderInstance.Owner(testcontext.Get(t))
 	require.NoError(t, err, "Getting authorized forwarder owner shouldn't fail")
 	require.Equal(t, operator.Hex(), owner, "Forwarder owner should match operator")
 }
 
 func ProcessNewEvent(
 	t *testing.T,
-	eventSub geth.Subscription,
 	operatorCreated chan *operator_factory.OperatorFactoryOperatorCreated,
 	authorizedForwarderCreated chan *operator_factory.OperatorFactoryAuthorizedForwarderCreated,
 	event *types.Log,
 	eventDetails *abi.Event,
 	operatorFactoryInstance contracts.OperatorFactory,
-	contractABI *abi.ABI,
 	chainClient blockchain.EVMClient,
 ) {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	errorChan := make(chan error)
 	eventConfirmed := make(chan bool)
 	err := chainClient.ProcessEvent(eventDetails.Name, event, eventConfirmed, errorChan)
@@ -138,10 +138,10 @@ func SubscribeOperatorFactoryEvents(
 	chainClient blockchain.EVMClient,
 	operatorFactoryInstance contracts.OperatorFactory,
 ) {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	contractABI, err := operator_factory.OperatorFactoryMetaData.GetAbi()
 	require.NoError(t, err, "Getting contract abi for OperatorFactory shouldn't fail")
-	latestBlockNum, err := chainClient.LatestBlockNumber(context.Background())
+	latestBlockNum, err := chainClient.LatestBlockNumber(testcontext.Get(t))
 	require.NoError(t, err, "Subscribing to contract event log for OperatorFactory instance shouldn't fail")
 	query := geth.FilterQuery{
 		FromBlock: big.NewInt(0).SetUint64(latestBlockNum),
@@ -149,7 +149,7 @@ func SubscribeOperatorFactoryEvents(
 	}
 
 	eventLogs := make(chan types.Log)
-	sub, err := chainClient.SubscribeFilterLogs(context.Background(), query, eventLogs)
+	sub, err := chainClient.SubscribeFilterLogs(testcontext.Get(t), query, eventLogs)
 	require.NoError(t, err, "Subscribing to contract event log for OperatorFactory instance shouldn't fail")
 	go func() {
 		defer sub.Unsubscribe()
@@ -160,14 +160,14 @@ func SubscribeOperatorFactoryEvents(
 				l.Error().Err(err).Msg("Error while watching for new contract events. Retrying Subscription")
 				sub.Unsubscribe()
 
-				sub, err = chainClient.SubscribeFilterLogs(context.Background(), query, eventLogs)
+				sub, err = chainClient.SubscribeFilterLogs(testcontext.Get(t), query, eventLogs)
 				require.NoError(t, err, "Subscribing to contract event log for OperatorFactory instance shouldn't fail")
 			case vLog := <-eventLogs:
 				eventDetails, err := contractABI.EventByID(vLog.Topics[0])
 				require.NoError(t, err, "Getting event details for OperatorFactory instance shouldn't fail")
 				go ProcessNewEvent(
-					t, sub, operatorCreated, authorizedForwarderCreated, &vLog,
-					eventDetails, operatorFactoryInstance, contractABI, chainClient,
+					t, operatorCreated, authorizedForwarderCreated, &vLog,
+					eventDetails, operatorFactoryInstance, chainClient,
 				)
 				if eventDetails.Name == "AuthorizedForwarderCreated" || eventDetails.Name == "OperatorCreated" {
 					remainingExpectedEvents--
@@ -180,13 +180,14 @@ func SubscribeOperatorFactoryEvents(
 	}()
 }
 
+// Deprecated: we are moving away from blockchain.EVMClient, use actions_seth.TrackForwarder
 func TrackForwarder(
 	t *testing.T,
 	chainClient blockchain.EVMClient,
 	authorizedForwarder common.Address,
-	node *client.Chainlink,
+	node *client.ChainlinkK8sClient,
 ) {
-	l := utils.GetTestLogger(t)
+	l := logging.GetTestLogger(t)
 	chainID := chainClient.GetChainID()
 	_, _, err := node.TrackForwarder(chainID, authorizedForwarder)
 	require.NoError(t, err, "Forwarder track should be created")

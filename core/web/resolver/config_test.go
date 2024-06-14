@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -38,7 +39,7 @@ func TestResolver_ConfigV2(t *testing.T) {
 		{
 			name:          "empty",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				opts := chainlink.GeneralConfigOpts{}
 				cfg, err := opts.New()
 				require.NoError(t, err)
@@ -50,10 +51,10 @@ func TestResolver_ConfigV2(t *testing.T) {
 		{
 			name:          "full",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				opts := chainlink.GeneralConfigOpts{
-					ConfigStrings: []string{configFull},
-					SecretsString: "",
+					ConfigStrings:  []string{configFull},
+					SecretsStrings: []string{},
 				}
 				cfg, err := opts.New()
 				require.NoError(t, err)
@@ -65,10 +66,10 @@ func TestResolver_ConfigV2(t *testing.T) {
 		{
 			name:          "partial",
 			authenticated: true,
-			before: func(f *gqlTestFramework) {
+			before: func(ctx context.Context, f *gqlTestFramework) {
 				opts := chainlink.GeneralConfigOpts{
-					ConfigStrings: []string{configMulti},
-					SecretsString: "",
+					ConfigStrings:  []string{configMulti},
+					SecretsStrings: []string{},
 				}
 				cfg, err := opts.New()
 				require.NoError(t, err)

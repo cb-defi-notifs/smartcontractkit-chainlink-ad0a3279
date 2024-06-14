@@ -2,19 +2,20 @@
 
 Before starting, you will need:
 1. A working [Go](https://go.dev/doc/install) installation
-2. EVM chain endpoint URLs 
+2. EVM chain endpoint URLs
    - The endpoint can be a local node, or an externally hosted node, e.g. [alchemy](alchemy.com) or [infura](infura.io)
    - Both the HTTPS and WSS URLs of your endpoint are needed
 3. The chain ID corresponding to your chain, you can find the chain ID for your chosen chain [here](https://chainlist.org/)
 4. The private key of an account funded with LINK, and the chain's native token (to pay transaction fees)
    - Steps for exporting your private key from Metamask can be found [here](https://metamask.zendesk.com/hc/en-us/articles/360015289632-How-to-Export-an-Account-Private-Key)
 5. The LINK address, LINK-ETH feed address, fast gas feed address for your chain
+6. Install [docker](https://docs.docker.com/get-docker/) for CLI and GUI (optional)
+7. \[Optional\] get a [tenderly API key](https://docs.tenderly.co/other/platform-access/how-to-generate-api-access-tokens) and find your [username / project name](https://docs.tenderly.co/other/platform-access/how-to-find-the-project-slug-username-and-organization-name).
 
-The example .env in this repo is for the Polygon Mumbai testnet. You can use [this faucet](https://faucets.chain.link/mumbai) to send testnet LINK 
+The example .env in this repo is for the Polygon Mumbai testnet. You can use [this faucet](https://faucets.chain.link/mumbai) to send testnet LINK
 to your wallet ahead of executing the next steps
 
->Note: Be careful with your key. When using testnets, it's best to use a separate
->account that does not hold real funds.
+>Note: Be careful with your key. When using testnets, it's best to use a separate account that does not hold real funds.
 
 ## Run OCR2Keepers locally
 
@@ -100,6 +101,7 @@ You can also combine the `bootstrap` and `launch-and-test` commands into a singl
 ```shell
 ./chaincli keeper launch-and-test --bootstrap
 ```
+In the output of this command, you will see the http address of the nodes, e.g. `http://localhost:6688`. This is the Chainlink Operator GUI. You can use the default username `notreal@fakeemail.ch` and password `fj293fbBnlQ!f9vNs~#` to log in.
 
 ### Logs
 Now that the nodes are running, you can use the `logs` subcommand to stream the output of the containers to your local terminal:
@@ -120,3 +122,5 @@ You can use the `grep` and `grepv` flags to filter log lines, e.g. to only show 
 ```shell
 ./chaincli keeper logs --grep keepers-plugin
 ```
+
+---

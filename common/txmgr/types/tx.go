@@ -1,22 +1,24 @@
 package types
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pkg/errors"
 	"gopkg.in/guregu/null.v4"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink-common/pkg/sqlutil"
+	clnull "github.com/smartcontractkit/chainlink-common/pkg/utils/null"
 
 	feetypes "github.com/smartcontractkit/chainlink/v2/common/fee/types"
 	"github.com/smartcontractkit/chainlink/v2/common/types"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
-	clnull "github.com/smartcontractkit/chainlink/v2/core/null"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg/datatypes"
 )
 
 // TxStrategy controls how txes are queued and sent
@@ -28,30 +30,60 @@ type TxStrategy interface {
 	// PruneQueue is called after tx insertion
 	// It accepts the service responsible for deleting
 	// unstarted txs and deletion options
-	PruneQueue(pruneService UnstartedTxQueuePruner, qopt pg.QOpt) (n int64, err error)
+	PruneQueue(ctx context.Context, pruneService UnstartedTxQueuePruner) (ids []int64, err error)
 }
 
-type TxAttemptState string
+type TxAttemptState int8
 
 type TxState string
 
 const (
-	TxAttemptInProgress = TxAttemptState("in_progress")
-	// TODO: Make name chain-agnostic (https://smartcontract-it.atlassian.net/browse/BCI-981)
-	TxAttemptInsufficientEth = TxAttemptState("insufficient_eth")
-	TxAttemptBroadcast       = TxAttemptState("broadcast")
+	TxAttemptInProgress TxAttemptState = iota + 1
+	TxAttemptInsufficientFunds
+	TxAttemptBroadcast
+	txAttemptStateCount // always at end to calculate number of states
 )
 
+var txAttemptStateStrings = []string{
+	"unknown_attempt_state",    // default 0 value
+	TxAttemptInProgress:        "in_progress",
+	TxAttemptInsufficientFunds: "insufficient_funds",
+	TxAttemptBroadcast:         "broadcast",
+}
+
+func NewTxAttemptState(state string) (s TxAttemptState) {
+	if index := slices.Index(txAttemptStateStrings, state); index != -1 {
+		s = TxAttemptState(index)
+	}
+	return s
+}
+
+// String returns string formatted states for logging
+func (s TxAttemptState) String() (str string) {
+	if s < txAttemptStateCount {
+		return txAttemptStateStrings[s]
+	}
+	return txAttemptStateStrings[0]
+}
+
 type TxRequest[ADDR types.Hashable, TX_HASH types.Hashable] struct {
+	// IdempotencyKey is a globally unique ID set by the caller, to prevent accidental creation of duplicated Txs during retries or crash recovery.
+	// If this field is set, the TXM will first search existing Txs with this field.
+	// If found, it will return the existing Tx, without creating a new one. TXM will not validate or ensure that existing Tx is same as the incoming TxRequest.
+	// If not found, TXM will create a new Tx.
+	// If IdempotencyKey is set to null, TXM will always create a new Tx.
+	// Since IdempotencyKey has to be globally unique, consider prepending the service or component's name it is being used by
+	// Such as {service}-{ID}. E.g vrf-12345
+	IdempotencyKey   *string
 	FromAddress      ADDR
 	ToAddress        ADDR
 	EncodedPayload   []byte
 	Value            big.Int
-	FeeLimit         uint32
+	FeeLimit         uint64
 	Meta             *TxMeta[ADDR, TX_HASH]
 	ForwarderAddress ADDR
 
-	// Pipeline variables - if you aren't calling this from ethtx task within
+	// Pipeline variables - if you aren't calling this from chain tx task within
 	// the pipeline, you don't need these variables
 	MinConfirmations  clnull.Uint32
 	PipelineTaskRunID *uuid.UUID
@@ -60,6 +92,9 @@ type TxRequest[ADDR types.Hashable, TX_HASH types.Hashable] struct {
 
 	// Checker defines the check that should be run before a transaction is submitted on chain.
 	Checker TransmitCheckerSpec[ADDR]
+
+	// Mark tx requiring callback
+	SignalCallback bool
 }
 
 // TransmitCheckerSpec defines the check that should be performed before a transaction is submitted
@@ -101,9 +136,22 @@ type TxMeta[ADDR types.Hashable, TX_HASH types.Hashable] struct {
 	// Used for the VRFv2 - the subscription ID of the
 	// requester of the VRF.
 	SubID *uint64 `json:"SubId,omitempty"`
+	// Used for the VRFv2Plus - the uint256 subscription ID of the
+	// requester of the VRF.
+	GlobalSubID *string `json:"GlobalSubId,omitempty"`
+	// Used for VRFv2Plus - max native token this tx will bill
+	// should it get bumped
+	MaxEth *string `json:"MaxEth,omitempty"`
 
 	// Used for keepers
 	UpkeepID *string `json:"UpkeepID,omitempty"`
+
+	// Used for VRF to know if the txn is a ForceFulfilment txn
+	ForceFulfilled          *bool   `json:"ForceFulfilled,omitempty"`
+	ForceFulfillmentAttempt *uint64 `json:"ForceFulfillmentAttempt,omitempty"`
+
+	// Used for Keystone Workflows
+	WorkflowExecutionID *string `json:"WorkflowExecutionID,omitempty"`
 
 	// Used only for forwarded txs, tracks the original destination address.
 	// When this is set, it indicates tx is forwarded through To address.
@@ -127,7 +175,7 @@ type TxAttempt[
 	Tx    Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]
 	TxFee FEE
 	// ChainSpecificFeeLimit on the TxAttempt is always the same as the on-chain encoded value for fee limit
-	ChainSpecificFeeLimit   uint32
+	ChainSpecificFeeLimit   uint64
 	SignedRawTx             []byte
 	Hash                    TX_HASH
 	CreatedAt               time.Time
@@ -135,6 +183,7 @@ type TxAttempt[
 	State                   TxAttemptState
 	Receipts                []ChainReceipt[TX_HASH, BLOCK_HASH] `json:"-"`
 	TxType                  int
+	IsPurgeAttempt          bool
 }
 
 func (a *TxAttempt[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) String() string {
@@ -149,6 +198,7 @@ type Tx[
 	FEE feetypes.Fee,
 ] struct {
 	ID             int64
+	IdempotencyKey *string
 	Sequence       *SEQ
 	FromAddress    ADDR
 	ToAddress      ADDR
@@ -156,12 +206,12 @@ type Tx[
 	Value          big.Int
 	// FeeLimit on the Tx is always the conceptual gas limit, which is not
 	// necessarily the same as the on-chain encoded value (i.e. Optimism)
-	FeeLimit uint32
+	FeeLimit uint64
 	Error    null.String
-	// BroadcastAt is updated every time an attempt for this eth_tx is re-sent
+	// BroadcastAt is updated every time an attempt for this tx is re-sent
 	// In almost all cases it will be within a second or so of the actual send time.
 	BroadcastAt *time.Time
-	// InitialBroadcastAt is recorded once, the first ever time this eth_tx is sent
+	// InitialBroadcastAt is recorded once, the first ever time this tx is sent
 	InitialBroadcastAt *time.Time
 	CreatedAt          time.Time
 	State              TxState
@@ -169,7 +219,7 @@ type Tx[
 	// Marshalled TxMeta
 	// Used for additional context around transactions which you want to log
 	// at send time.
-	Meta    *datatypes.JSON
+	Meta    *sqlutil.JSON
 	Subject uuid.NullUUID
 	ChainID CHAIN_ID
 
@@ -178,7 +228,12 @@ type Tx[
 
 	// TransmitChecker defines the check that should be performed before a transaction is submitted on
 	// chain.
-	TransmitChecker *datatypes.JSON
+	TransmitChecker *sqlutil.JSON
+
+	// Marks tx requiring callback
+	SignalCallback bool
+	// Marks tx callback as signaled
+	CallbackCompleted bool
 }
 
 func (e *Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) GetError() error {
@@ -199,12 +254,16 @@ func (e *Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) GetMeta() (*TxMeta[A
 		return nil, nil
 	}
 	var m TxMeta[ADDR, TX_HASH]
-	return &m, errors.Wrap(json.Unmarshal(*e.Meta, &m), "unmarshalling meta")
+	if err := json.Unmarshal(*e.Meta, &m); err != nil {
+		return nil, fmt.Errorf("unmarshalling meta: %w", err)
+	}
+
+	return &m, nil
 }
 
 // GetLogger returns a new logger with metadata fields.
-func (e *Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) GetLogger(lgr logger.Logger) logger.Logger {
-	lgr = lgr.With(
+func (e *Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) GetLogger(lgr logger.Logger) logger.SugaredLogger {
+	lgr = logger.With(lgr,
 		"txID", e.ID,
 		"sequence", e.Sequence,
 		"checker", e.TransmitChecker,
@@ -214,19 +273,19 @@ func (e *Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) GetLogger(lgr logger
 	meta, err := e.GetMeta()
 	if err != nil {
 		lgr.Errorw("failed to get meta of the transaction", "err", err)
-		return lgr
+		return logger.Sugared(lgr)
 	}
 
 	if meta != nil {
-		lgr = lgr.With("jobID", meta.JobID)
+		lgr = logger.With(lgr, "jobID", meta.JobID)
 
 		if meta.RequestTxHash != nil {
-			lgr = lgr.With("requestTxHash", *meta.RequestTxHash)
+			lgr = logger.With(lgr, "requestTxHash", *meta.RequestTxHash)
 		}
 
 		if meta.RequestID != nil {
 			id := *meta.RequestID
-			lgr = lgr.With("requestID", new(big.Int).SetBytes(id.Bytes()).String())
+			lgr = logger.With(lgr, "requestID", new(big.Int).SetBytes(id.Bytes()).String())
 		}
 
 		if len(meta.RequestIDs) != 0 {
@@ -234,37 +293,37 @@ func (e *Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) GetLogger(lgr logger
 			for _, id := range meta.RequestIDs {
 				ids = append(ids, new(big.Int).SetBytes(id.Bytes()).String())
 			}
-			lgr = lgr.With("requestIDs", strings.Join(ids, ","))
+			lgr = logger.With(lgr, "requestIDs", strings.Join(ids, ","))
 		}
 
 		if meta.UpkeepID != nil {
-			lgr = lgr.With("upkeepID", *meta.UpkeepID)
+			lgr = logger.With(lgr, "upkeepID", *meta.UpkeepID)
 		}
 
 		if meta.SubID != nil {
-			lgr = lgr.With("subID", *meta.SubID)
+			lgr = logger.With(lgr, "subID", *meta.SubID)
 		}
 
 		if meta.MaxLink != nil {
-			lgr = lgr.With("maxLink", *meta.MaxLink)
+			lgr = logger.With(lgr, "maxLink", *meta.MaxLink)
 		}
 
 		if meta.FwdrDestAddress != nil {
-			lgr = lgr.With("FwdrDestAddress", *meta.FwdrDestAddress)
+			lgr = logger.With(lgr, "FwdrDestAddress", *meta.FwdrDestAddress)
 		}
 
 		if len(meta.MessageIDs) > 0 {
 			for _, mid := range meta.MessageIDs {
-				lgr = lgr.With("messageID", mid)
+				lgr = logger.With(lgr, "messageID", mid)
 			}
 		}
 
 		if len(meta.SeqNumbers) > 0 {
-			lgr = lgr.With("SeqNumbers", meta.SeqNumbers)
+			lgr = logger.With(lgr, "SeqNumbers", meta.SeqNumbers)
 		}
 	}
 
-	return lgr
+	return logger.Sugared(lgr)
 }
 
 // GetChecker returns an Tx's transmit checker spec in struct form, unmarshalling it from JSON
@@ -274,5 +333,9 @@ func (e *Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE]) GetChecker() (Transm
 		return TransmitCheckerSpec[ADDR]{}, nil
 	}
 	var t TransmitCheckerSpec[ADDR]
-	return t, errors.Wrap(json.Unmarshal(*e.TransmitChecker, &t), "unmarshalling transmit checker")
+	if err := json.Unmarshal(*e.TransmitChecker, &t); err != nil {
+		return t, fmt.Errorf("unmarshalling transmit checker: %w", err)
+	}
+
+	return t, nil
 }

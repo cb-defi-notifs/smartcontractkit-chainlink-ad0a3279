@@ -6,10 +6,10 @@ import (
 	"math/big"
 	"time"
 
-	clienttypes "github.com/smartcontractkit/chainlink/v2/common/chains/client"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+	"github.com/smartcontractkit/chainlink/v2/common/client"
 	feetypes "github.com/smartcontractkit/chainlink/v2/common/fee/types"
 	"github.com/smartcontractkit/chainlink/v2/common/types"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 // TxmClient is a superset of all the methods needed for the txm
@@ -45,22 +45,26 @@ type TransactionClient[
 
 	BatchSendTransactions(
 		ctx context.Context,
-		updateBroadcastTime func(now time.Time, txIDs []int64) error,
 		attempts []TxAttempt[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE],
 		bathSize int,
-		lggr logger.Logger,
-	) ([]clienttypes.SendTxReturnCode, []error, error)
+		lggr logger.SugaredLogger,
+	) (
+		txCodes []client.SendTxReturnCode,
+		txErrs []error,
+		broadcastTime time.Time,
+		successfulTxIDs []int64,
+		err error)
 	SendTransactionReturnCode(
 		ctx context.Context,
 		tx Tx[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE],
 		attempt TxAttempt[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE],
-		lggr logger.Logger,
-	) (clienttypes.SendTxReturnCode, error)
+		lggr logger.SugaredLogger,
+	) (client.SendTxReturnCode, error)
 	SendEmptyTransaction(
 		ctx context.Context,
-		newTxAttempt func(seq SEQ, feeLimit uint32, fee FEE, fromAddress ADDR) (attempt TxAttempt[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE], err error),
+		newTxAttempt func(ctx context.Context, seq SEQ, feeLimit uint64, fee FEE, fromAddress ADDR) (attempt TxAttempt[CHAIN_ID, ADDR, TX_HASH, BLOCK_HASH, SEQ, FEE], err error),
 		seq SEQ,
-		gasLimit uint32,
+		gasLimit uint64,
 		fee FEE,
 		fromAddress ADDR,
 	) (txhash string, err error)

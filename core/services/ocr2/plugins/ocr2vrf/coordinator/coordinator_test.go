@@ -12,7 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/types"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -21,9 +21,14 @@ import (
 
 	"github.com/smartcontractkit/libocr/commontypes"
 	ocr2Types "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
-	"github.com/smartcontractkit/ocr2vrf/dkg"
-	"github.com/smartcontractkit/ocr2vrf/ocr2vrf"
-	ocr2vrftypes "github.com/smartcontractkit/ocr2vrf/types"
+
+	"github.com/smartcontractkit/chainlink-vrf/dkg"
+	"github.com/smartcontractkit/chainlink-vrf/ocr2vrf"
+	ocr2vrftypes "github.com/smartcontractkit/chainlink-vrf/types"
+	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/mathutil"
 
 	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
@@ -35,7 +40,6 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2vrf/coordinator/mocks"
-	"github.com/smartcontractkit/chainlink/v2/core/utils/mathutil"
 )
 
 func TestCoordinator_BeaconPeriod(t *testing.T) {
@@ -82,11 +86,11 @@ func TestCoordinator_DKGVRFCommittees(t *testing.T) {
 		coordinatorAddress := newAddress(t)
 		beaconAddress := newAddress(t)
 		dkgAddress := newAddress(t)
-		lp.On("LatestLogByEventSigWithConfs", tp.configSetTopic, beaconAddress, 10, mock.Anything).
+		lp.On("LatestLogByEventSigWithConfs", mock.Anything, tp.configSetTopic, beaconAddress, evmtypes.Confirmations(10)).
 			Return(&logpoller.Log{
 				Data: hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000a6fca200010576e704b4a519484d6239ef17f1f5b4a82e330b0daf827ed4dc2789971b0000000000000000000000000000000000000000000000000000000000000032000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000001e0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000002e000000000000000000000000000000000000000000000000000000000000000050000000000000000000000000a8cbea12a06869d3ec432ab9682dab6c761d591000000000000000000000000f4f9db7bb1d16b7cdfb18ec68994c26964f5985300000000000000000000000022fb3f90c539457f00d8484438869135e604a65500000000000000000000000033cbcedccb11c9773ad78e214ba342e979255ab30000000000000000000000006ffaa96256fbc1012325cca88c79f725c33eed80000000000000000000000000000000000000000000000000000000000000000500000000000000000000000074103cf8b436465870b26aa9fa2f62ad62b22e3500000000000000000000000038a6cb196f805cc3041f6645a5a6cec27b64430d00000000000000000000000047d7095cfebf8285bdaa421bc8268d0db87d933c000000000000000000000000a8842be973800ff61d80d2d53fa62c3a685380eb0000000000000000000000003750e31321aee8c024751877070e8d5f704ce98700000000000000000000000000000000000000000000000000000000000000206f3b82406688b8ddb944c6f2e6d808f014c8fa8d568d639c25019568c715fbf000000000000000000000000000000000000000000000000000000000000004220880d88ee16f1080c8afa0251880c8afa025208090dfc04a288090dfc04a30033a05010101010142206c5ca6f74b532222ac927dd3de235d46a943e372c0563393a33b01dcfd3f371c4220855114d25c2ef5e85fffe4f20a365672d8f2dba3b2ec82333f494168a2039c0442200266e835634db00977cbc1caa4db10e1676c1a4c0fcbc6ba7f09300f0d1831824220980cd91f7a73f20f4b0d51d00cd4e00373dc2beafbb299ca3c609757ab98c8304220eb6d36e2af8922085ff510bbe1eb8932a0e3295ca9f047fef25d90e69c52948f4a34313244334b6f6f574463364b7232644542684b59326b336e685057694676544565325331703978544532544b74344d7572716f684a34313244334b6f6f574b436e4367724b637743324a3577576a626e355435335068646b6b6f57454e534a39546537544b7836366f4a4a34313244334b6f6f575239616f675948786b357a38636b624c4c56346e426f7a777a747871664a7050586671336d4a7232796452474a34313244334b6f6f5744695444635565675637776b313133473366476a69616259756f54436f3157726f6f53656741343263556f544a34313244334b6f6f574e64687072586b5472665370354d5071736270467a70364167394a53787358694341434442676454424c656652820300050e416c74424e2d3132382047e282810e86e8cf899ae9a1b43e023bbe8825b103659bb8d6d4e54f6a3cfae7b106069c216a812d7616e47f0bd38fa4863f48fbcda6a38af4c58d2233dfa7cf79620947042d09f923e0a2f7a2270391e8b058d8bdb8f79fe082b7b627f025651c7290382fdff97c3181d15d162c146ce87ff752499d2acc2b26011439a12e29571a6f1e1defb1751c3be4258c493984fd9f0f6b4a26c539870b5f15bfed3d8ffac92499eb62dbd2beb7c1524275a8019022f6ce6a7e86c9e65e3099452a2b96fc2432b127a112970e1adf615f823b2b2180754c2f0ee01f1b389e56df55ca09702cd0401b66ff71779d2dd67222503a85ab921b28c329cc1832800b192d0b0247c0776e1b9653dc00df48daa6364287c84c0382f5165e7269fef06d10bc67c1bba252305d1af0dc7bb0fe92558eb4c5f38c23163dee1cfb34a72020669dbdfe337c16f3307472616e736c61746f722066726f6d20416c74424e2d3132382047e2828120746f20416c74424e2d3132382047e282825880ade2046080c8afa0256880c8afa0257080ade204788094ebdc0382019e010a205034214e0bd4373f38e162cf9fc9133e2f3b71441faa4c3d1ac01c1877f1cd2712200e03e975b996f911abba2b79d2596c2150bc94510963c40a1137a03df6edacdb1a107dee1cdb894163813bb3da604c9c133c1a10bb33302eeafbd55d352e35dcc5d2b3311a10d2c658b6b93d74a02d467849b6fe75251a10fea5308cc1fea69e7246eafe7ca8a3a51a1048efe1ad873b6f025ac0243bdef715f8000000000000000000000000000000000000000000000000000000000000"),
 			}, nil)
-		lp.On("LatestLogByEventSigWithConfs", tp.configSetTopic, dkgAddress, 10, mock.Anything).
+		lp.On("LatestLogByEventSigWithConfs", mock.Anything, tp.configSetTopic, dkgAddress, evmtypes.Confirmations(10)).
 			Return(&logpoller.Log{
 				Data: hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000a6fca200010576e704b4a519484d6239ef17f1f5b4a82e330b0daf827ed4dc2789971b0000000000000000000000000000000000000000000000000000000000000032000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000001e0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000002e000000000000000000000000000000000000000000000000000000000000000050000000000000000000000000a8cbea12a06869d3ec432ab9682dab6c761d591000000000000000000000000f4f9db7bb1d16b7cdfb18ec68994c26964f5985300000000000000000000000022fb3f90c539457f00d8484438869135e604a65500000000000000000000000033cbcedccb11c9773ad78e214ba342e979255ab30000000000000000000000006ffaa96256fbc1012325cca88c79f725c33eed80000000000000000000000000000000000000000000000000000000000000000500000000000000000000000074103cf8b436465870b26aa9fa2f62ad62b22e3500000000000000000000000038a6cb196f805cc3041f6645a5a6cec27b64430d00000000000000000000000047d7095cfebf8285bdaa421bc8268d0db87d933c000000000000000000000000a8842be973800ff61d80d2d53fa62c3a685380eb0000000000000000000000003750e31321aee8c024751877070e8d5f704ce98700000000000000000000000000000000000000000000000000000000000000206f3b82406688b8ddb944c6f2e6d808f014c8fa8d568d639c25019568c715fbf000000000000000000000000000000000000000000000000000000000000004220880d88ee16f1080c8afa0251880c8afa025208090dfc04a288090dfc04a30033a05010101010142206c5ca6f74b532222ac927dd3de235d46a943e372c0563393a33b01dcfd3f371c4220855114d25c2ef5e85fffe4f20a365672d8f2dba3b2ec82333f494168a2039c0442200266e835634db00977cbc1caa4db10e1676c1a4c0fcbc6ba7f09300f0d1831824220980cd91f7a73f20f4b0d51d00cd4e00373dc2beafbb299ca3c609757ab98c8304220eb6d36e2af8922085ff510bbe1eb8932a0e3295ca9f047fef25d90e69c52948f4a34313244334b6f6f574463364b7232644542684b59326b336e685057694676544565325331703978544532544b74344d7572716f684a34313244334b6f6f574b436e4367724b637743324a3577576a626e355435335068646b6b6f57454e534a39546537544b7836366f4a4a34313244334b6f6f575239616f675948786b357a38636b624c4c56346e426f7a777a747871664a7050586671336d4a7232796452474a34313244334b6f6f5744695444635565675637776b313133473366476a69616259756f54436f3157726f6f53656741343263556f544a34313244334b6f6f574e64687072586b5472665370354d5071736270467a70364167394a53787358694341434442676454424c656652820300050e416c74424e2d3132382047e282810e86e8cf899ae9a1b43e023bbe8825b103659bb8d6d4e54f6a3cfae7b106069c216a812d7616e47f0bd38fa4863f48fbcda6a38af4c58d2233dfa7cf79620947042d09f923e0a2f7a2270391e8b058d8bdb8f79fe082b7b627f025651c7290382fdff97c3181d15d162c146ce87ff752499d2acc2b26011439a12e29571a6f1e1defb1751c3be4258c493984fd9f0f6b4a26c539870b5f15bfed3d8ffac92499eb62dbd2beb7c1524275a8019022f6ce6a7e86c9e65e3099452a2b96fc2432b127a112970e1adf615f823b2b2180754c2f0ee01f1b389e56df55ca09702cd0401b66ff71779d2dd67222503a85ab921b28c329cc1832800b192d0b0247c0776e1b9653dc00df48daa6364287c84c0382f5165e7269fef06d10bc67c1bba252305d1af0dc7bb0fe92558eb4c5f38c23163dee1cfb34a72020669dbdfe337c16f3307472616e736c61746f722066726f6d20416c74424e2d3132382047e2828120746f20416c74424e2d3132382047e282825880ade2046080c8afa0256880c8afa0257080ade204788094ebdc0382019e010a205034214e0bd4373f38e162cf9fc9133e2f3b71441faa4c3d1ac01c1877f1cd2712200e03e975b996f911abba2b79d2596c2150bc94510963c40a1137a03df6edacdb1a107dee1cdb894163813bb3da604c9c133c1a10bb33302eeafbd55d352e35dcc5d2b3311a10d2c658b6b93d74a02d467849b6fe75251a10fea5308cc1fea69e7246eafe7ca8a3a51a1048efe1ad873b6f025ac0243bdef715f8000000000000000000000000000000000000000000000000000000000000"),
 			}, nil)
@@ -131,7 +135,7 @@ func TestCoordinator_DKGVRFCommittees(t *testing.T) {
 		tp := newTopics()
 
 		beaconAddress := newAddress(t)
-		lp.On("LatestLogByEventSigWithConfs", tp.configSetTopic, beaconAddress, 10, mock.Anything).
+		lp.On("LatestLogByEventSigWithConfs", mock.Anything, tp.configSetTopic, beaconAddress, evmtypes.Confirmations(10)).
 			Return(nil, errors.New("rpc error"))
 
 		c := &coordinator{
@@ -153,11 +157,11 @@ func TestCoordinator_DKGVRFCommittees(t *testing.T) {
 		beaconAddress := newAddress(t)
 		coordinatorAddress := newAddress(t)
 		dkgAddress := newAddress(t)
-		lp.On("LatestLogByEventSigWithConfs", tp.configSetTopic, beaconAddress, 10, mock.Anything).
+		lp.On("LatestLogByEventSigWithConfs", mock.Anything, tp.configSetTopic, beaconAddress, evmtypes.Confirmations(10)).
 			Return(&logpoller.Log{
 				Data: hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000a6fca200010576e704b4a519484d6239ef17f1f5b4a82e330b0daf827ed4dc2789971b0000000000000000000000000000000000000000000000000000000000000032000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000001e0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000002e000000000000000000000000000000000000000000000000000000000000000050000000000000000000000000a8cbea12a06869d3ec432ab9682dab6c761d591000000000000000000000000f4f9db7bb1d16b7cdfb18ec68994c26964f5985300000000000000000000000022fb3f90c539457f00d8484438869135e604a65500000000000000000000000033cbcedccb11c9773ad78e214ba342e979255ab30000000000000000000000006ffaa96256fbc1012325cca88c79f725c33eed80000000000000000000000000000000000000000000000000000000000000000500000000000000000000000074103cf8b436465870b26aa9fa2f62ad62b22e3500000000000000000000000038a6cb196f805cc3041f6645a5a6cec27b64430d00000000000000000000000047d7095cfebf8285bdaa421bc8268d0db87d933c000000000000000000000000a8842be973800ff61d80d2d53fa62c3a685380eb0000000000000000000000003750e31321aee8c024751877070e8d5f704ce98700000000000000000000000000000000000000000000000000000000000000206f3b82406688b8ddb944c6f2e6d808f014c8fa8d568d639c25019568c715fbf000000000000000000000000000000000000000000000000000000000000004220880d88ee16f1080c8afa0251880c8afa025208090dfc04a288090dfc04a30033a05010101010142206c5ca6f74b532222ac927dd3de235d46a943e372c0563393a33b01dcfd3f371c4220855114d25c2ef5e85fffe4f20a365672d8f2dba3b2ec82333f494168a2039c0442200266e835634db00977cbc1caa4db10e1676c1a4c0fcbc6ba7f09300f0d1831824220980cd91f7a73f20f4b0d51d00cd4e00373dc2beafbb299ca3c609757ab98c8304220eb6d36e2af8922085ff510bbe1eb8932a0e3295ca9f047fef25d90e69c52948f4a34313244334b6f6f574463364b7232644542684b59326b336e685057694676544565325331703978544532544b74344d7572716f684a34313244334b6f6f574b436e4367724b637743324a3577576a626e355435335068646b6b6f57454e534a39546537544b7836366f4a4a34313244334b6f6f575239616f675948786b357a38636b624c4c56346e426f7a777a747871664a7050586671336d4a7232796452474a34313244334b6f6f5744695444635565675637776b313133473366476a69616259756f54436f3157726f6f53656741343263556f544a34313244334b6f6f574e64687072586b5472665370354d5071736270467a70364167394a53787358694341434442676454424c656652820300050e416c74424e2d3132382047e282810e86e8cf899ae9a1b43e023bbe8825b103659bb8d6d4e54f6a3cfae7b106069c216a812d7616e47f0bd38fa4863f48fbcda6a38af4c58d2233dfa7cf79620947042d09f923e0a2f7a2270391e8b058d8bdb8f79fe082b7b627f025651c7290382fdff97c3181d15d162c146ce87ff752499d2acc2b26011439a12e29571a6f1e1defb1751c3be4258c493984fd9f0f6b4a26c539870b5f15bfed3d8ffac92499eb62dbd2beb7c1524275a8019022f6ce6a7e86c9e65e3099452a2b96fc2432b127a112970e1adf615f823b2b2180754c2f0ee01f1b389e56df55ca09702cd0401b66ff71779d2dd67222503a85ab921b28c329cc1832800b192d0b0247c0776e1b9653dc00df48daa6364287c84c0382f5165e7269fef06d10bc67c1bba252305d1af0dc7bb0fe92558eb4c5f38c23163dee1cfb34a72020669dbdfe337c16f3307472616e736c61746f722066726f6d20416c74424e2d3132382047e2828120746f20416c74424e2d3132382047e282825880ade2046080c8afa0256880c8afa0257080ade204788094ebdc0382019e010a205034214e0bd4373f38e162cf9fc9133e2f3b71441faa4c3d1ac01c1877f1cd2712200e03e975b996f911abba2b79d2596c2150bc94510963c40a1137a03df6edacdb1a107dee1cdb894163813bb3da604c9c133c1a10bb33302eeafbd55d352e35dcc5d2b3311a10d2c658b6b93d74a02d467849b6fe75251a10fea5308cc1fea69e7246eafe7ca8a3a51a1048efe1ad873b6f025ac0243bdef715f8000000000000000000000000000000000000000000000000000000000000"),
 			}, nil)
-		lp.On("LatestLogByEventSigWithConfs", tp.configSetTopic, dkgAddress, 10, mock.Anything).
+		lp.On("LatestLogByEventSigWithConfs", mock.Anything, tp.configSetTopic, dkgAddress, evmtypes.Confirmations(10)).
 			Return(nil, errors.New("rpc error"))
 
 		c := &coordinator{
@@ -227,6 +231,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, []uint64{195}, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -236,7 +241,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessRequestedLog(t, 3, 195, 191, 0, coordinatorAddress),
 			newRandomnessRequestedLog(t, 3, 195, 192, 1, coordinatorAddress),
@@ -268,7 +272,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, blocks, 1)
 		assert.Len(t, callbacks, 0)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -286,6 +290,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, []uint64{195}, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -295,7 +300,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 191, 1, 1000, coordinatorAddress),
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 192, 2, 1000, coordinatorAddress),
@@ -330,7 +334,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 			assert.False(t, b.ShouldStore)
 		}
 		assert.Len(t, callbacks, 3)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -348,6 +352,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, []uint64{195}, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -357,7 +362,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessRequestedLog(t, 3, 195, 191, 0, coordinatorAddress),
 			newRandomnessRequestedLog(t, 3, 195, 192, 1, coordinatorAddress),
@@ -397,7 +401,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, blocks, 0)
 		assert.Len(t, callbacks, 0)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -417,6 +421,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		// when a VRF fulfillment happens on chain.
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -426,7 +431,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 191, 1, 1000, coordinatorAddress),
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 192, 2, 1000, coordinatorAddress),
@@ -468,7 +472,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, blocks, 0)
 		assert.Len(t, callbacks, 0)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -486,6 +490,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, []uint64{}, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -495,7 +500,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{newOutputsServedLog(t, []vrf_coordinator.VRFBeaconTypesOutputServed{
 			{
 				Height:            195,
@@ -530,7 +534,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, blocks, 0)
 		assert.Len(t, callbacks, 0)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -597,6 +601,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		c.lp = lp
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -606,7 +611,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 191, 1, 1000, coordinatorAddress),
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 192, 2, 1000, coordinatorAddress),
@@ -632,7 +636,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, blocks, 0)
 		assert.Len(t, callbacks, 0)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -659,6 +663,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, requestedBlocks, latestHeadNumber, true, true, blockhashLookback)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -668,7 +673,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return(logs, nil)
 
 		c := &coordinator{
@@ -702,7 +706,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 			assert.True(t, b.ShouldStore)
 		}
 		assert.Len(t, callbacks, 0)
-		assert.Equal(t, uint64(latestHeadNumber-blockhashLookback+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-blockhashLookback+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(blockhashLookback))
 	})
 
@@ -721,6 +725,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, requestedBlocks, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -730,7 +735,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessRequestedLog(t, 3, 195, 191, 0, coordinatorAddress),
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 191, 1, 2_000_000, coordinatorAddress),
@@ -769,7 +773,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 			assert.True(t, b.ShouldStore)
 		}
 		assert.Len(t, callbacks, 2)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -788,6 +792,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, requestedBlocks, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -797,7 +802,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessRequestedLog(t, 3, 195, 191, 0, coordinatorAddress),
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 191, 1, 10_000_000, coordinatorAddress),
@@ -832,7 +836,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, blocks, 1)
 		assert.Len(t, callbacks, 1)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -851,6 +855,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, requestedBlocks, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -860,7 +865,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessRequestedLog(t, 3, 195, 191, 0, coordinatorAddress),
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 191, 1, 10_000_000, coordinatorAddress),
@@ -898,7 +902,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, blocks, 2)
 		assert.Len(t, callbacks, 2)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
 	})
 
@@ -917,6 +921,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, requestedBlocks, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -926,7 +931,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{}, nil)
 
 		c := &coordinator{
@@ -953,7 +957,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		)
 
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Equal(t, common.HexToHash(fmt.Sprintf("0x00%d", 1)), recentBlocks[0])
 		assert.Equal(t, common.HexToHash(fmt.Sprintf("0x00%d", lookbackBlocks)), recentBlocks[len(recentBlocks)-1])
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
@@ -974,6 +978,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		lp := getLogPoller(t, requestedBlocks, latestHeadNumber, true, true, lookbackBlocks)
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -983,7 +988,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{}, nil)
 
 		c := &coordinator{
@@ -1010,7 +1014,7 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		)
 
 		assert.NoError(t, err)
-		assert.Equal(t, uint64(latestHeadNumber-lookbackBlocks+1), recentHeightStart)
+		assert.Equal(t, latestHeadNumber-lookbackBlocks+1, recentHeightStart)
 		assert.Equal(t, common.HexToHash(fmt.Sprintf("0x00%d", 1)), recentBlocks[0])
 		assert.Equal(t, common.HexToHash(fmt.Sprintf("0x00%d", lookbackBlocks)), recentBlocks[len(recentBlocks)-1])
 		assert.Len(t, recentBlocks, int(lookbackBlocks))
@@ -1030,12 +1034,13 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 		requestedBlocks := []uint64{195, 196}
 		lp := lp_mocks.NewLogPoller(t)
 		lp.On("LatestBlock", mock.Anything).
-			Return(int64(latestHeadNumber), nil)
+			Return(logpoller.LogPollerBlock{BlockNumber: int64(latestHeadNumber)}, nil)
 
-		lp.On("GetBlocksRange", mock.Anything, append(requestedBlocks, uint64(latestHeadNumber-lookbackBlocks+1), uint64(latestHeadNumber)), mock.Anything).
+		lp.On("GetBlocksRange", mock.Anything, append(requestedBlocks, latestHeadNumber-lookbackBlocks+1, latestHeadNumber)).
 			Return(nil, errors.New("GetBlocks error"))
 		lp.On(
 			"LogsWithSigs",
+			mock.Anything,
 			int64(latestHeadNumber-lookbackBlocks),
 			int64(latestHeadNumber),
 			[]common.Hash{
@@ -1045,7 +1050,6 @@ func TestCoordinator_ReportBlocks(t *testing.T) {
 				tp.outputsServedTopic,
 			},
 			coordinatorAddress,
-			mock.Anything,
 		).Return([]logpoller.Log{
 			newRandomnessRequestedLog(t, 3, 195, 191, 0, coordinatorAddress),
 			newRandomnessFulfillmentRequestedLog(t, 3, 195, 191, 1, 10_000_000, coordinatorAddress),
@@ -1215,9 +1219,9 @@ func TestCoordinator_ReportIsOnchain(t *testing.T) {
 		configDigest := common.BigToHash(big.NewInt(1337))
 		log := newNewTransmissionLog(t, beaconAddress, configDigest)
 		log.BlockNumber = 195
-		lp.On("IndexedLogs", tp.newTransmissionTopic, beaconAddress, 2, []common.Hash{
+		lp.On("IndexedLogs", mock.Anything, tp.newTransmissionTopic, beaconAddress, 2, []common.Hash{
 			enrTopic,
-		}, 1, mock.Anything).Return([]logpoller.Log{log}, nil)
+		}, evmtypes.Confirmations(1)).Return([]logpoller.Log{log}, nil)
 
 		c := &coordinator{
 			lp:            lp,
@@ -1251,9 +1255,9 @@ func TestCoordinator_ReportIsOnchain(t *testing.T) {
 		newConfigDigest := common.BigToHash(big.NewInt(8888))
 		log := newNewTransmissionLog(t, beaconAddress, oldConfigDigest)
 		log.BlockNumber = 195
-		lp.On("IndexedLogs", tp.newTransmissionTopic, beaconAddress, 2, []common.Hash{
+		lp.On("IndexedLogs", mock.Anything, tp.newTransmissionTopic, beaconAddress, 2, []common.Hash{
 			enrTopic,
-		}, 1, mock.Anything).Return([]logpoller.Log{log}, nil)
+		}, evmtypes.Confirmations(1)).Return([]logpoller.Log{log}, nil)
 
 		c := &coordinator{
 			lp:            lp,
@@ -1278,9 +1282,9 @@ func TestCoordinator_ReportIsOnchain(t *testing.T) {
 		epochAndRound := toEpochAndRoundUint40(epoch, round)
 		enrTopic := common.BytesToHash(common.LeftPadBytes(epochAndRound.Bytes(), 32))
 		lp := lp_mocks.NewLogPoller(t)
-		lp.On("IndexedLogs", tp.newTransmissionTopic, beaconAddress, 2, []common.Hash{
+		lp.On("IndexedLogs", mock.Anything, tp.newTransmissionTopic, beaconAddress, 2, []common.Hash{
 			enrTopic,
-		}, 1, mock.Anything).Return([]logpoller.Log{}, nil)
+		}, evmtypes.Confirmations(1)).Return([]logpoller.Log{}, nil)
 
 		c := &coordinator{
 			lp:            lp,
@@ -1295,7 +1299,6 @@ func TestCoordinator_ReportIsOnchain(t *testing.T) {
 		assert.NoError(t, err)
 		assert.False(t, present)
 	})
-
 }
 
 func TestCoordinator_ConfirmationDelays(t *testing.T) {
@@ -1467,7 +1470,7 @@ func newRandomnessRequestedLog(
 		SubID:                  big.NewInt(1),
 		CostJuels:              big.NewInt(50_000),
 		NewSubBalance:          big.NewInt(100_000),
-		Raw: types.Log{
+		Raw: gethtypes.Log{
 			BlockNumber: requestBlock,
 		},
 	}
@@ -1542,7 +1545,7 @@ func newRandomnessFulfillmentRequestedLog(
 		Requester:              common.HexToAddress("0x1234567890"),
 		CostJuels:              big.NewInt(50_000),
 		NewSubBalance:          big.NewInt(100_000),
-		Raw: types.Log{
+		Raw: gethtypes.Log{
 			BlockNumber: requestBlock,
 		},
 	}
@@ -1718,7 +1721,7 @@ func getLogPoller(
 	lp := lp_mocks.NewLogPoller(t)
 	if needsLatestBlock {
 		lp.On("LatestBlock", mock.Anything).
-			Return(int64(latestHeadNumber), nil)
+			Return(logpoller.LogPollerBlock{BlockNumber: int64(latestHeadNumber)}, nil)
 	}
 	var logPollerBlocks []logpoller.LogPollerBlock
 
@@ -1748,7 +1751,7 @@ func getLogPoller(
 		})
 	}
 
-	lp.On("GetBlocksRange", mock.Anything, requestedBlocks, mock.Anything).
+	lp.On("GetBlocksRange", mock.Anything, requestedBlocks).
 		Return(logPollerBlocks, nil)
 
 	return lp
@@ -1761,7 +1764,7 @@ func TestFilterNamesFromSpec(t *testing.T) {
 
 	spec := &job.OCR2OracleSpec{
 		ContractID: beaconAddress.String(),
-		PluginType: job.OCR2VRF,
+		PluginType: types.OCR2VRF,
 		PluginConfig: job.JSONConfig{
 			"VRFCoordinatorAddress": coordinatorAddress.String(),
 			"DKGContractAddress":    dkgAddress.String(),
@@ -1775,7 +1778,7 @@ func TestFilterNamesFromSpec(t *testing.T) {
 	assert.Equal(t, logpoller.FilterName("VRF Coordinator", beaconAddress, coordinatorAddress, dkgAddress), names[0])
 
 	spec = &job.OCR2OracleSpec{
-		PluginType:   job.OCR2VRF,
+		PluginType:   types.OCR2VRF,
 		ContractID:   beaconAddress.String(),
 		PluginConfig: nil, // missing coordinator & dkg addresses
 	}

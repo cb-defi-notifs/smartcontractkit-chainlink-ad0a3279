@@ -1,7 +1,30 @@
 package config
 
-import ocr2models "github.com/smartcontractkit/chainlink/v2/core/services/ocr2/models"
+import (
+	"time"
+
+	commonconfig "github.com/smartcontractkit/chainlink-common/pkg/config"
+	"github.com/smartcontractkit/chainlink-common/pkg/types"
+)
+
+type MercuryCache interface {
+	LatestReportTTL() time.Duration
+	MaxStaleAge() time.Duration
+	LatestReportDeadline() time.Duration
+}
+
+type MercuryTLS interface {
+	CertFile() string
+}
+
+type MercuryTransmitter interface {
+	TransmitQueueMaxSize() uint32
+	TransmitTimeout() commonconfig.Duration
+}
 
 type Mercury interface {
-	Credentials(credName string) *ocr2models.MercuryCredentials
+	Credentials(credName string) *types.MercuryCredentials
+	Cache() MercuryCache
+	TLS() MercuryTLS
+	Transmitter() MercuryTransmitter
 }

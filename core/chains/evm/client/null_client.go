@@ -9,10 +9,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rpc"
 
-	clienttypes "github.com/smartcontractkit/chainlink/v2/common/chains/client"
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink-common/pkg/assets"
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+
+	commonclient "github.com/smartcontractkit/chainlink/v2/common/client"
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 // NullClient satisfies the Client but has no side effects
@@ -22,7 +23,7 @@ type NullClient struct {
 }
 
 func NewNullClient(cid *big.Int, lggr logger.Logger) *NullClient {
-	return &NullClient{cid: cid, lggr: lggr.Named("NullClient")}
+	return &NullClient{cid: cid, lggr: logger.Named(lggr, "NullClient")}
 }
 
 // NullClientChainID the ChainID that nullclient will return
@@ -72,7 +73,7 @@ type nullSubscription struct {
 }
 
 func newNullSubscription(lggr logger.Logger) *nullSubscription {
-	return &nullSubscription{lggr: lggr.Named("nullSubscription")}
+	return &nullSubscription{lggr: logger.Named(lggr, "NullSubscription")}
 }
 
 func (ns *nullSubscription) Unsubscribe() {
@@ -121,18 +122,13 @@ func (nc *NullClient) HeaderByHash(ctx context.Context, h common.Hash) (*types.H
 	return nil, nil
 }
 
-func (nc *NullClient) SendTransactionReturnCode(ctx context.Context, tx *types.Transaction, sender common.Address) (clienttypes.SendTxReturnCode, error) {
+func (nc *NullClient) SendTransactionReturnCode(ctx context.Context, tx *types.Transaction, sender common.Address) (commonclient.SendTxReturnCode, error) {
 	nc.lggr.Debug("SendTransactionReturnCode")
-	return clienttypes.Successful, nil
+	return commonclient.Successful, nil
 }
 
 func (nc *NullClient) SendTransaction(ctx context.Context, tx *types.Transaction) error {
 	nc.lggr.Debug("SendTransaction")
-	return nil
-}
-
-func (nc *NullClient) SimulateTransaction(ctx context.Context, tx *types.Transaction) error {
-	nc.lggr.Debug("SimulateTransaction")
 	return nil
 }
 
@@ -181,11 +177,6 @@ func (nc *NullClient) BalanceAt(ctx context.Context, account common.Address, blo
 	return big.NewInt(0), nil
 }
 
-func (nc *NullClient) FilterEvents(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
-	nc.lggr.Debug("FilterEvents")
-	return nil, nil
-}
-
 func (nc *NullClient) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
 	nc.lggr.Debug("FilterLogs")
 	return nil, nil
@@ -203,6 +194,11 @@ func (nc *NullClient) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
 
 func (nc *NullClient) CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error) {
 	nc.lggr.Debug("CallContract")
+	return nil, nil
+}
+
+func (nc *NullClient) PendingCallContract(ctx context.Context, msg ethereum.CallMsg) ([]byte, error) {
+	nc.lggr.Debug("PendingCallContract")
 	return nil, nil
 }
 
@@ -230,4 +226,12 @@ func (nc *NullClient) NodeStates() map[string]string { return nil }
 func (nc *NullClient) IsL2() bool {
 	nc.lggr.Debug("IsL2")
 	return false
+}
+
+func (nc *NullClient) LatestFinalizedBlock(_ context.Context) (*evmtypes.Head, error) {
+	return nil, nil
+}
+
+func (nc *NullClient) CheckTxValidity(_ context.Context, _ common.Address, _ common.Address, _ []byte) *SendError {
+	return nil
 }

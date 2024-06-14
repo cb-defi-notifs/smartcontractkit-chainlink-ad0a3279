@@ -13,7 +13,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 
-	v2 "github.com/smartcontractkit/chainlink/v2/core/config/v2"
+	"github.com/smartcontractkit/chainlink/v2/core/config/env"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/plugins"
@@ -48,19 +48,12 @@ func (l *LoopRegistryServer) discoveryHandler(w http.ResponseWriter, req *http.R
 	w.Header().Set("Content-Type", "application/json")
 	var groups []*targetgroup.Group
 
-	for _, registeredPlugin := range l.registry.List() {
-		// create a metric target for each running plugin
-		target := &targetgroup.Group{
-			Targets: []model.LabelSet{
-				// target address will be called by external prometheus
-				{model.AddressLabel: model.LabelValue(fmt.Sprintf("%s:%d", l.discoveryHostName, l.exposedPromPort))},
-			},
-			Labels: map[model.LabelName]model.LabelValue{
-				model.MetricsPathLabel: model.LabelValue(pluginMetricPath(registeredPlugin.Name)),
-			},
-		}
+	// add node metrics to service discovery
+	groups = append(groups, metricTarget(l.discoveryHostName, l.exposedPromPort, "/metrics"))
 
-		groups = append(groups, target)
+	// add all the plugins
+	for _, registeredPlugin := range l.registry.List() {
+		groups = append(groups, metricTarget(l.discoveryHostName, l.exposedPromPort, pluginMetricPath(registeredPlugin.Name)))
 	}
 
 	b, err := l.jsonMarshalFn(groups)
@@ -77,10 +70,21 @@ func (l *LoopRegistryServer) discoveryHandler(w http.ResponseWriter, req *http.R
 		w.WriteHeader(http.StatusInternalServerError)
 		l.logger.Error(err)
 	}
-
 }
 
-// pluginMetricHandlers routes from endpoints published in service discovery to the the backing LOOP endpoint
+func metricTarget(hostName string, port int, path string) *targetgroup.Group {
+	return &targetgroup.Group{
+		Targets: []model.LabelSet{
+			// target address will be called by external prometheus
+			{model.AddressLabel: model.LabelValue(fmt.Sprintf("%s:%d", hostName, port))},
+		},
+		Labels: map[model.LabelName]model.LabelValue{
+			model.MetricsPathLabel: model.LabelValue(path),
+		},
+	}
+}
+
+// pluginMetricHandlers routes from endpoints published in service discovery to the backing LOOP endpoint
 func (l *LoopRegistryServer) pluginMetricHandler(gc *gin.Context) {
 	pluginName := gc.Param("name")
 	p, ok := l.registry.Get(pluginName)
@@ -90,7 +94,7 @@ func (l *LoopRegistryServer) pluginMetricHandler(gc *gin.Context) {
 	}
 
 	// unlike discovery, this endpoint is internal btw the node and plugin
-	pluginURL := fmt.Sprintf("http://%s:%d/metrics", l.loopHostName, p.EnvCfg.PrometheusPort())
+	pluginURL := fmt.Sprintf("http://%s:%d/metrics", l.loopHostName, p.EnvCfg.PrometheusPort)
 	res, err := l.client.Get(pluginURL) //nolint
 	if err != nil {
 		msg := fmt.Sprintf("plugin metric handler failed to get plugin url %s", html.EscapeString(pluginURL))
@@ -112,7 +116,7 @@ func (l *LoopRegistryServer) pluginMetricHandler(gc *gin.Context) {
 
 func initHostNames() (discoveryHost, loopHost string) {
 	var exists bool
-	discoveryHost, exists = v2.EnvPrometheusDiscoveryHostName.Lookup()
+	discoveryHost, exists = env.PrometheusDiscoveryHostName.Lookup()
 	if !exists {
 		var err error
 		discoveryHost, err = os.Hostname()
@@ -121,7 +125,7 @@ func initHostNames() (discoveryHost, loopHost string) {
 		}
 	}
 
-	loopHost, exists = v2.EnvLooppHostName.Lookup()
+	loopHost, exists = env.LOOPPHostName.Lookup()
 	if !exists {
 		// this is the expected case; no known uses for the env var other than
 		// as an escape hatch.

@@ -12,10 +12,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/smartcontractkit/sqlx"
+	"github.com/jmoiron/sqlx"
 	"go.uber.org/multierr"
 
-	v2 "github.com/smartcontractkit/chainlink/v2/core/config/v2"
+	"github.com/smartcontractkit/chainlink/v2/core/config/env"
 	"github.com/smartcontractkit/chainlink/v2/core/store/dialects"
 )
 
@@ -44,7 +44,7 @@ func init() {
 		// -short tests don't need a DB
 		return
 	}
-	dbURL := string(v2.EnvDatabaseURL.Get())
+	dbURL := string(env.DatabaseURL.Get())
 	if dbURL == "" {
 		panic("you must provide a CL_DATABASE_URL environment variable")
 	}
@@ -54,11 +54,11 @@ func init() {
 		panic(err)
 	}
 	if parsed.Path == "" {
-		msg := fmt.Sprintf("invalid %[1]s: `%[2]s`. You must set %[1]s env var to point to your test database. Note that the test database MUST end in `_test` to differentiate from a possible production DB. HINT: Try %[1]s=postgresql://postgres@localhost:5432/chainlink_test?sslmode=disable", v2.EnvDatabaseURL, parsed.String())
+		msg := fmt.Sprintf("invalid %[1]s: `%[2]s`. You must set %[1]s env var to point to your test database. Note that the test database MUST end in `_test` to differentiate from a possible production DB. HINT: Try %[1]s=postgresql://postgres@localhost:5432/chainlink_test?sslmode=disable", env.DatabaseURL, parsed.String())
 		panic(msg)
 	}
 	if !strings.HasSuffix(parsed.Path, "_test") {
-		msg := fmt.Sprintf("cannot run tests against database named `%s`. Note that the test database MUST end in `_test` to differentiate from a possible production DB. HINT: Try %s=postgresql://postgres@localhost:5432/chainlink_test?sslmode=disable", parsed.Path[1:], v2.EnvDatabaseURL)
+		msg := fmt.Sprintf("cannot run tests against database named `%s`. Note that the test database MUST end in `_test` to differentiate from a possible production DB. HINT: Try %s=postgresql://postgres@localhost:5432/chainlink_test?sslmode=disable", parsed.Path[1:], env.DatabaseURL)
 		panic(msg)
 	}
 	name := string(dialects.TransactionWrappedPostgres)
@@ -71,8 +71,11 @@ func init() {
 
 var _ driver.Conn = &conn{}
 
-// txDriver is an sql driver which runs on single transaction
-// when the Close is called, transaction is rolled back
+var _ driver.Validator = &conn{}
+var _ driver.SessionResetter = &conn{}
+
+// txDriver is an sql driver which runs on a single transaction.
+// When `Close` is called, transaction is rolled back.
 type txDriver struct {
 	sync.Mutex
 	db    *sql.DB
@@ -86,7 +89,7 @@ func (d *txDriver) Open(dsn string) (driver.Conn, error) {
 	defer d.Unlock()
 	// Open real db connection if its the first call
 	if d.db == nil {
-		db, err := sql.Open("pgx", d.dbURL)
+		db, err := sql.Open(string(dialects.Postgres), d.dbURL)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +101,7 @@ func (d *txDriver) Open(dsn string) (driver.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		c = &conn{tx: tx, opened: 1}
+		c = &conn{tx: tx, opened: 1, dsn: dsn}
 		c.removeSelf = func() error {
 			return d.deleteConn(c)
 		}
@@ -107,8 +110,8 @@ func (d *txDriver) Open(dsn string) (driver.Conn, error) {
 	return c, nil
 }
 
-// deleteConn is called by connection when it is closed
-// It also auto-closes the DB when the last checked out connection is closed
+// deleteConn is called by a connection when it is closed via the `close` method.
+// It also auto-closes the DB when the last checked out connection is closed.
 func (d *txDriver) deleteConn(c *conn) error {
 	// must lock here to avoid racing with Open
 	d.Lock()
@@ -147,8 +150,9 @@ func (c *conn) Begin() (driver.Tx, error) {
 }
 
 // Implement the "ConnBeginTx" interface
-func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	// TODO: Fix context handling
+func (c *conn) BeginTx(_ context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	// Context is ignored, because single transaction is shared by all callers, thus caller should not be able to
+	// control it with local context
 	return c.Begin()
 }
 
@@ -174,6 +178,27 @@ func (c *conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 		return nil, err
 	}
 	return &stmt{st, c}, nil
+}
+
+// IsValid is called prior to placing the connection into the
+// connection pool by database/sql. The connection will be discarded if false is returned.
+func (c *conn) IsValid() bool {
+	c.Lock()
+	defer c.Unlock()
+	return !c.closed
+}
+
+func (c *conn) ResetSession(ctx context.Context) error {
+	// Ensure bad connections are reported: From database/sql/driver:
+	// If a connection is never returned to the connection pool but immediately reused, then
+	// ResetSession is called prior to reuse but IsValid is not called.
+	c.Lock()
+	defer c.Unlock()
+	if c.closed {
+		return driver.ErrBadConn
+	}
+
+	return nil
 }
 
 // pgx returns nil

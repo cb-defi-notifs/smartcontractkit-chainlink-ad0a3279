@@ -11,11 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/cmd"
 	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest"
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/p2pkey"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
 	"github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
 
@@ -24,7 +26,7 @@ func TestP2PKeyPresenter_RenderTable(t *testing.T) {
 
 	var (
 		id     = "1"
-		peerID = "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X"
+		peerID = configtest.DefaultPeerID
 		pubKey = "somepubkey"
 		buffer = bytes.NewBufferString("")
 		r      = cmd.RendererTable{Writer: buffer}
@@ -60,9 +62,10 @@ func TestP2PKeyPresenter_RenderTable(t *testing.T) {
 
 func TestShell_ListP2PKeys(t *testing.T) {
 	t.Parallel()
+	ctx := testutils.Context(t)
 
 	app := startNewApplicationV2(t, nil)
-	key, err := app.GetKeyStore().P2P().Create()
+	key, err := app.GetKeyStore().P2P().Create(ctx)
 	require.NoError(t, err)
 
 	requireP2PKeyCount(t, app, 1)
@@ -91,17 +94,18 @@ func TestShell_CreateP2PKey(t *testing.T) {
 
 func TestShell_DeleteP2PKey(t *testing.T) {
 	t.Parallel()
+	ctx := testutils.Context(t)
 
 	app := startNewApplicationV2(t, nil)
 	client, _ := app.NewShellAndRenderer()
 
-	key, err := app.GetKeyStore().P2P().Create()
+	key, err := app.GetKeyStore().P2P().Create(ctx)
 	require.NoError(t, err)
 
 	requireP2PKeyCount(t, app, 1)
 
 	set := flag.NewFlagSet("test", 0)
-	cltest.FlagSetApplyFromAction(client.DeleteP2PKey, set, "")
+	flagSetApplyFromAction(client.DeleteP2PKey, set, "")
 
 	require.NoError(t, set.Set("yes", "true"))
 
@@ -117,12 +121,13 @@ func TestShell_DeleteP2PKey(t *testing.T) {
 
 func TestShell_ImportExportP2PKeyBundle(t *testing.T) {
 	t.Parallel()
+	ctx := testutils.Context(t)
 
 	defer deleteKeyExportFile(t)
 
 	app := startNewApplicationV2(t, nil)
 	client, _ := app.NewShellAndRenderer()
-	_, err := app.GetKeyStore().P2P().Create()
+	_, err := app.GetKeyStore().P2P().Create(ctx)
 	require.NoError(t, err)
 
 	keys := requireP2PKeyCount(t, app, 1)
@@ -131,7 +136,7 @@ func TestShell_ImportExportP2PKeyBundle(t *testing.T) {
 
 	// Export test invalid id
 	set := flag.NewFlagSet("test P2P export", 0)
-	cltest.FlagSetApplyFromAction(client.ExportP2PKey, set, "")
+	flagSetApplyFromAction(client.ExportP2PKey, set, "")
 
 	require.NoError(t, set.Parse([]string{"0"}))
 	require.NoError(t, set.Set("new-password", "../internal/fixtures/incorrect_password.txt"))
@@ -144,7 +149,7 @@ func TestShell_ImportExportP2PKeyBundle(t *testing.T) {
 
 	// Export test
 	set = flag.NewFlagSet("test P2P export", 0)
-	cltest.FlagSetApplyFromAction(client.ExportP2PKey, set, "")
+	flagSetApplyFromAction(client.ExportP2PKey, set, "")
 
 	require.NoError(t, set.Parse([]string{fmt.Sprint(key.ID())}))
 	require.NoError(t, set.Set("new-password", "../internal/fixtures/incorrect_password.txt"))
@@ -155,11 +160,11 @@ func TestShell_ImportExportP2PKeyBundle(t *testing.T) {
 	require.NoError(t, client.ExportP2PKey(c))
 	require.NoError(t, utils.JustError(os.Stat(keyName)))
 
-	require.NoError(t, utils.JustError(app.GetKeyStore().P2P().Delete(key.PeerID())))
+	require.NoError(t, utils.JustError(app.GetKeyStore().P2P().Delete(ctx, key.PeerID())))
 	requireP2PKeyCount(t, app, 0)
 
 	set = flag.NewFlagSet("test P2P import", 0)
-	cltest.FlagSetApplyFromAction(client.ImportP2PKey, set, "")
+	flagSetApplyFromAction(client.ImportP2PKey, set, "")
 
 	require.NoError(t, set.Parse([]string{keyName}))
 	require.NoError(t, set.Set("old-password", "../internal/fixtures/incorrect_password.txt"))

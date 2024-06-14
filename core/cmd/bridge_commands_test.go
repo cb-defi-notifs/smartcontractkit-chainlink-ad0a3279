@@ -63,6 +63,7 @@ func TestBridgePresenter_RenderTable(t *testing.T) {
 
 func TestShell_IndexBridges(t *testing.T) {
 	t.Parallel()
+	ctx := testutils.Context(t)
 
 	app := startNewApplicationV2(t, nil)
 	client, r := app.NewShellAndRenderer()
@@ -72,7 +73,7 @@ func TestShell_IndexBridges(t *testing.T) {
 		URL:           cltest.WebURL(t, "https://testing.com/bridges"),
 		Confirmations: 0,
 	}
-	err := app.BridgeORM().CreateBridgeType(bt1)
+	err := app.BridgeORM().CreateBridgeType(ctx, bt1)
 	require.NoError(t, err)
 
 	bt2 := &bridges.BridgeType{
@@ -80,7 +81,7 @@ func TestShell_IndexBridges(t *testing.T) {
 		URL:           cltest.WebURL(t, "https://testing.com/bridges"),
 		Confirmations: 0,
 	}
-	err = app.BridgeORM().CreateBridgeType(bt2)
+	err = app.BridgeORM().CreateBridgeType(ctx, bt2)
 	require.NoError(t, err)
 
 	require.Nil(t, client.IndexBridges(cltest.EmptyCLIContext()))
@@ -108,10 +109,10 @@ func TestShell_ShowBridge(t *testing.T) {
 		URL:           cltest.WebURL(t, "https://testing.com/bridges"),
 		Confirmations: 0,
 	}
-	require.NoError(t, app.BridgeORM().CreateBridgeType(bt))
+	require.NoError(t, app.BridgeORM().CreateBridgeType(testutils.Context(t), bt))
 
 	set := flag.NewFlagSet("test", 0)
-	cltest.FlagSetApplyFromAction(client.ShowBridge, set, "")
+	flagSetApplyFromAction(client.ShowBridge, set, "")
 
 	require.NoError(t, set.Parse([]string{bt.Name.String()}))
 
@@ -148,7 +149,7 @@ func TestShell_CreateBridge(t *testing.T) {
 		test := tt
 		t.Run(test.name, func(t *testing.T) {
 			set := flag.NewFlagSet("bridge", 0)
-			cltest.FlagSetApplyFromAction(client.CreateBridge, set, "")
+			flagSetApplyFromAction(client.CreateBridge, set, "")
 
 			require.NoError(t, set.Parse([]string{test.param}))
 
@@ -173,11 +174,11 @@ func TestShell_RemoveBridge(t *testing.T) {
 		URL:           cltest.WebURL(t, "https://testing.com/bridges"),
 		Confirmations: 0,
 	}
-	err := app.BridgeORM().CreateBridgeType(bt)
+	err := app.BridgeORM().CreateBridgeType(testutils.Context(t), bt)
 	require.NoError(t, err)
 
 	set := flag.NewFlagSet("test", 0)
-	cltest.FlagSetApplyFromAction(client.RemoveBridge, set, "")
+	flagSetApplyFromAction(client.RemoveBridge, set, "")
 
 	require.NoError(t, set.Parse([]string{bt.Name.String()}))
 

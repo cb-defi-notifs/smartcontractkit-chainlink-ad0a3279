@@ -1,8 +1,9 @@
 package types
 
 import (
+	"context"
+
 	"github.com/smartcontractkit/chainlink/v2/common/types"
-	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
 )
 
 // KeyStore encompasses the subset of keystore used by txmgr
@@ -16,9 +17,7 @@ type KeyStore[
 	// Chain's sequence type. For example, EVM chains use nonce, bitcoin uses UTXO.
 	SEQ types.Sequence,
 ] interface {
-	CheckEnabled(address ADDR, chainID CHAIN_ID) error
-	NextSequence(address ADDR, chainID CHAIN_ID, qopts ...pg.QOpt) (SEQ, error)
-	EnabledAddressesForChain(chainId CHAIN_ID) ([]ADDR, error)
-	IncrementNextSequence(address ADDR, chainID CHAIN_ID, currentSequence SEQ, qopts ...pg.QOpt) error
-	SubscribeToKeyChanges() (ch chan struct{}, unsub func())
+	CheckEnabled(ctx context.Context, address ADDR, chainID CHAIN_ID) error
+	EnabledAddressesForChain(ctx context.Context, chainId CHAIN_ID) ([]ADDR, error)
+	SubscribeToKeyChanges(ctx context.Context) (ch chan struct{}, unsub func())
 }

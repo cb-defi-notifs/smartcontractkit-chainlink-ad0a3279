@@ -2,6 +2,7 @@ package types
 
 import (
 	"bytes"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -13,15 +14,17 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/ugorji/go/codec"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/utils/hex"
 
 	htrktypes "github.com/smartcontractkit/chainlink/v2/common/headtracker/types"
 	commontypes "github.com/smartcontractkit/chainlink/v2/common/types"
-	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/types/internal/blocks"
-	"github.com/smartcontractkit/chainlink/v2/core/null"
-	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 )
 
 // Head represents a BlockNumber, BlockHash.
@@ -29,25 +32,26 @@ type Head struct {
 	ID               uint64
 	Hash             common.Hash
 	Number           int64
-	L1BlockNumber    null.Int64
+	L1BlockNumber    sql.NullInt64
 	ParentHash       common.Hash
 	Parent           *Head
-	EVMChainID       *utils.Big
+	EVMChainID       *ubig.Big
 	Timestamp        time.Time
 	CreatedAt        time.Time
 	BaseFeePerGas    *assets.Wei
 	ReceiptsRoot     common.Hash
 	TransactionsRoot common.Hash
 	StateRoot        common.Hash
-	Difficulty       *utils.Big
-	TotalDifficulty  *utils.Big
+	Difficulty       *big.Int
+	TotalDifficulty  *big.Int
+	IsFinalized      bool
 }
 
 var _ commontypes.Head[common.Hash] = &Head{}
 var _ htrktypes.Head[common.Hash, *big.Int] = &Head{}
 
 // NewHead returns a Head instance.
-func NewHead(number *big.Int, blockHash common.Hash, parentHash common.Hash, timestamp uint64, chainID *utils.Big) Head {
+func NewHead(number *big.Int, blockHash common.Hash, parentHash common.Hash, timestamp uint64, chainID *ubig.Big) Head {
 	return Head{
 		Number:     number.Int64(),
 		Hash:       blockHash,
@@ -76,6 +80,14 @@ func (h *Head) GetParent() commontypes.Head[common.Hash] {
 	return h.Parent
 }
 
+func (h *Head) GetTimestamp() time.Time {
+	return h.Timestamp
+}
+
+func (h *Head) BlockDifficulty() *big.Int {
+	return h.Difficulty
+}
+
 // EarliestInChain recurses through parents until it finds the earliest one
 func (h *Head) EarliestInChain() *Head {
 	for h.Parent != nil {
@@ -95,11 +107,10 @@ func (h *Head) IsInChain(blockHash common.Hash) bool {
 		if h.Hash == blockHash {
 			return true
 		}
-		if h.Parent != nil {
-			h = h.Parent
-		} else {
+		if h.Parent == nil {
 			break
 		}
+		h = h.Parent
 	}
 	return false
 }
@@ -111,11 +122,10 @@ func (h *Head) HashAtHeight(blockNum int64) common.Hash {
 		if h.Number == blockNum {
 			return h.Hash
 		}
-		if h.Parent != nil {
-			h = h.Parent
-		} else {
+		if h.Parent == nil {
 			break
 		}
+		h = h.Parent
 	}
 	return common.Hash{}
 }
@@ -128,15 +138,14 @@ func (h *Head) ChainLength() uint32 {
 	l := uint32(1)
 
 	for {
-		if h.Parent != nil {
-			l++
-			if h == h.Parent {
-				panic("circular reference detected")
-			}
-			h = h.Parent
-		} else {
+		if h.Parent == nil {
 			break
 		}
+		l++
+		if h == h.Parent {
+			panic("circular reference detected")
+		}
+		h = h.Parent
 	}
 	return l
 }
@@ -147,16 +156,27 @@ func (h *Head) ChainHashes() []common.Hash {
 
 	for {
 		hashes = append(hashes, h.Hash)
-		if h.Parent != nil {
-			if h == h.Parent {
-				panic("circular reference detected")
-			}
-			h = h.Parent
-		} else {
+		if h.Parent == nil {
 			break
 		}
+		if h == h.Parent {
+			panic("circular reference detected")
+		}
+		h = h.Parent
 	}
 	return hashes
+}
+
+func (h *Head) LatestFinalizedHead() commontypes.Head[common.Hash] {
+	for h != nil {
+		if h.IsFinalized {
+			return h
+		}
+
+		h = h.Parent
+	}
+
+	return nil
 }
 
 func (h *Head) ChainID() *big.Int {
@@ -176,15 +196,14 @@ func (h *Head) ChainString() string {
 
 	for {
 		sb.WriteString(h.String())
-		if h.Parent != nil {
-			if h == h.Parent {
-				panic("circular reference detected")
-			}
-			sb.WriteString("->")
-			h = h.Parent
-		} else {
+		if h.Parent == nil {
 			break
 		}
+		if h == h.Parent {
+			panic("circular reference detected")
+		}
+		sb.WriteString("->")
+		h = h.Parent
 	}
 	sb.WriteString("->nil")
 	return sb.String()
@@ -223,6 +242,21 @@ func (h *Head) NextInt() *big.Int {
 	return new(big.Int).Add(h.ToInt(), big.NewInt(1))
 }
 
+// AsSlice returns a slice of heads up to length k
+// len(heads) may be less than k if the available chain is not long enough
+func (h *Head) AsSlice(k int) (heads []*Head) {
+	if k < 1 || h == nil {
+		return
+	}
+	heads = make([]*Head, 1)
+	heads[0] = h
+	for len(heads) < k && h.Parent != nil {
+		h = h.Parent
+		heads = append(heads, h)
+	}
+	return
+}
+
 func (h *Head) UnmarshalJSON(bs []byte) error {
 	type head struct {
 		Hash             common.Hash    `json:"hash"`
@@ -255,13 +289,13 @@ func (h *Head) UnmarshalJSON(bs []byte) error {
 	h.Timestamp = time.Unix(int64(jsonHead.Timestamp), 0).UTC()
 	h.BaseFeePerGas = assets.NewWei((*big.Int)(jsonHead.BaseFeePerGas))
 	if jsonHead.L1BlockNumber != nil {
-		h.L1BlockNumber = null.Int64From((*big.Int)(jsonHead.L1BlockNumber).Int64())
+		h.L1BlockNumber = sql.NullInt64{Int64: (*big.Int)(jsonHead.L1BlockNumber).Int64(), Valid: true}
 	}
 	h.ReceiptsRoot = jsonHead.ReceiptsRoot
 	h.TransactionsRoot = jsonHead.TransactionsRoot
 	h.StateRoot = jsonHead.StateRoot
-	h.Difficulty = utils.NewBig(jsonHead.Difficulty.ToInt())
-	h.TotalDifficulty = utils.NewBig(jsonHead.TotalDifficulty.ToInt())
+	h.Difficulty = jsonHead.Difficulty.ToInt()
+	h.TotalDifficulty = jsonHead.TotalDifficulty.ToInt()
 	return nil
 }
 
@@ -291,7 +325,7 @@ func (h *Head) MarshalJSON() ([]byte, error) {
 	if h.StateRoot != (common.Hash{}) {
 		jsonHead.StateRoot = &h.StateRoot
 	}
-	jsonHead.Number = (*hexutil.Big)(big.NewInt(int64(h.Number)))
+	jsonHead.Number = (*hexutil.Big)(big.NewInt(h.Number))
 	if h.ParentHash != (common.Hash{}) {
 		jsonHead.ParentHash = &h.ParentHash
 	}
@@ -335,11 +369,10 @@ func (b Block) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-var ErrMissingBlock = errors.New("missing block")
+var ErrMissingBlock = pkgerrors.New("missing block")
 
 // UnmarshalJSON unmarshals to a Block
 func (b *Block) UnmarshalJSON(data []byte) error {
-
 	var h codec.Handle = new(codec.JsonHandle)
 	bi := blocks.BlockInternal{}
 
@@ -350,12 +383,12 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if bi.Empty() {
-		return errors.WithStack(ErrMissingBlock)
+		return pkgerrors.WithStack(ErrMissingBlock)
 	}
 
 	n, err := hexutil.DecodeBig(bi.Number)
 	if err != nil {
-		return errors.Wrapf(err, "failed to decode block number while unmarshalling block, got:  '%s' in '%s'", bi.Number, data)
+		return pkgerrors.Wrapf(err, "failed to decode block number while unmarshalling block, got:  '%s' in '%s'", bi.Number, data)
 	}
 	*b = Block{
 		Number:        n.Int64(),
@@ -389,7 +422,6 @@ const LegacyTxType = blocks.TxType(0x0)
 
 // UnmarshalJSON unmarshals a Transaction
 func (t *Transaction) UnmarshalJSON(data []byte) error {
-
 	var h codec.Handle = new(codec.JsonHandle)
 	ti := blocks.TransactionInternal{}
 
@@ -401,7 +433,7 @@ func (t *Transaction) UnmarshalJSON(data []byte) error {
 	}
 
 	if ti.Gas == nil {
-		return errors.Errorf("expected 'gas' to not be null, got: '%s'", data)
+		return pkgerrors.Errorf("expected 'gas' to not be null, got: '%s'", data)
 	}
 	if ti.Type == nil {
 		tpe := LegacyTxType
@@ -413,7 +445,6 @@ func (t *Transaction) UnmarshalJSON(data []byte) error {
 }
 
 func (t *Transaction) MarshalJSON() ([]byte, error) {
-
 	ti := toInternalTxn(*t)
 
 	buf := bytes.NewBuffer(make([]byte, 0, 256))
@@ -431,7 +462,7 @@ var WeiPerEth = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 
 // ChainlinkFulfilledTopic is the signature for the event emitted after calling
 // ChainlinkClient.validateChainlinkCallback(requestId). See
-// ../../contracts/src/v0.6/ChainlinkClient.sol
+// ../../contracts/src/v0.8/ChainlinkClient.sol
 var ChainlinkFulfilledTopic = utils.MustHash("ChainlinkFulfilled(bytes32)")
 
 // ReceiptIndicatesRunLogFulfillment returns true if this tx receipt is the result of a
@@ -476,13 +507,13 @@ func (f *FunctionSelector) SetBytes(b []byte) { copy(f[:], b[:FunctionSelectorLe
 var hexRegexp = regexp.MustCompile("^[0-9a-fA-F]*$")
 
 func unmarshalFromString(s string, f *FunctionSelector) error {
-	if utils.HasHexPrefix(s) {
+	if hex.HasPrefix(s) {
 		if !hexRegexp.Match([]byte(s)[2:]) {
 			return fmt.Errorf("function selector %s must be 0x-hex encoded", s)
 		}
 		bytes := common.FromHex(s)
 		if len(bytes) != FunctionSelectorLength {
-			return errors.New("function ID must be 4 bytes in length")
+			return pkgerrors.New("function ID must be 4 bytes in length")
 		}
 		f.SetBytes(bytes)
 	} else {
@@ -539,7 +570,7 @@ type UntrustedBytes []byte
 func (ary UntrustedBytes) SafeByteSlice(start int, end int) ([]byte, error) {
 	if end > len(ary) || start > end || start < 0 || end < 0 {
 		var empty []byte
-		return empty, errors.New("out of bounds slice access")
+		return empty, pkgerrors.New("out of bounds slice access")
 	}
 	return ary[start:end], nil
 }
